@@ -1,16 +1,23 @@
+import { trackForMutations } from '@internal/immutableStateInvariantMiddleware'
+import { noop } from '@internal/listenerMiddleware/utils'
 import type {
-  Store,
-  MiddlewareAPI,
-  Dispatch,
   ImmutableStateInvariantMiddlewareOptions,
+  Middleware,
+  MiddlewareAPI,
+  Store,
 } from '@reduxjs/toolkit'
 import {
   createImmutableStateInvariantMiddleware,
   isImmutableDefault,
 } from '@reduxjs/toolkit'
 
-import { trackForMutations } from '@internal/immutableStateInvariantMiddleware'
-import { mockConsole, createConsole, getLog } from 'console-testing-library'
+type MWNext = Parameters<ReturnType<Middleware>>[0]
+
+interface CircularNode {
+  name: string
+  self?: CircularNode
+  parent?: unknown
+}
 
 describe('createImmutableStateInvariantMiddleware', () => {
   let state: { foo: { bar: number[]; baz: string } }
@@ -27,17 +34,17 @@ describe('createImmutableStateInvariantMiddleware', () => {
   })
 
   it('sends the action through the middleware chain', () => {
-    const next: Dispatch = (action) => ({ ...action, returned: true })
+    const next: MWNext = vi.fn()
     const dispatch = middleware()(next)
+    dispatch({ type: 'SOME_ACTION' })
 
-    expect(dispatch({ type: 'SOME_ACTION' })).toEqual({
+    expect(next).toHaveBeenCalledWith({
       type: 'SOME_ACTION',
-      returned: true,
     })
   })
 
   it('throws if mutating inside the dispatch', () => {
-    const next: Dispatch = (action) => {
+    const next: MWNext = (action) => {
       state.foo.bar.push(5)
       return action
     }
@@ -50,7 +57,7 @@ describe('createImmutableStateInvariantMiddleware', () => {
   })
 
   it('throws if mutating between dispatches', () => {
-    const next: Dispatch = (action) => action
+    const next: MWNext = (action) => action
 
     const dispatch = middleware()(next)
 
@@ -62,7 +69,7 @@ describe('createImmutableStateInvariantMiddleware', () => {
   })
 
   it('does not throw if not mutating inside the dispatch', () => {
-    const next: Dispatch = (action) => {
+    const next: MWNext = (action) => {
       state = { ...state, foo: { ...state.foo, baz: 'changed!' } }
       return action
     }
@@ -75,7 +82,7 @@ describe('createImmutableStateInvariantMiddleware', () => {
   })
 
   it('does not throw if not mutating between dispatches', () => {
-    const next: Dispatch = (action) => action
+    const next: MWNext = (action) => action
 
     const dispatch = middleware()(next)
 
@@ -86,8 +93,8 @@ describe('createImmutableStateInvariantMiddleware', () => {
     }).not.toThrow()
   })
 
-  it('works correctly with circular references', () => {
-    const next: Dispatch = (action) => action
+  it('works correctly with circular references in an action', () => {
+    const next: MWNext = (action) => action
 
     const dispatch = middleware()(next)
 
@@ -101,9 +108,98 @@ describe('createImmutableStateInvariantMiddleware', () => {
     }).not.toThrow()
   })
 
+  it('works correctly with circular references in the state', () => {
+    const next: MWNext = (action) => action
+
+    const circular: CircularNode = { name: 'circular' }
+    circular.self = circular
+    circular.parent = state.foo
+    Object.assign(state.foo, { circular })
+
+    const dispatch = middleware()(next)
+
+    expect(() => {
+      dispatch({ type: 'SOME_ACTION' })
+    }).not.toThrow()
+
+    expect(() => {
+      dispatch({ type: 'SOME_OTHER_ACTION' })
+    }).not.toThrow()
+  })
+
+  it('detects a mutation inside a circular reference', () => {
+    const circular: CircularNode = { name: 'circular' }
+    circular.self = circular
+    Object.assign(state.foo, { circular })
+
+    const next: MWNext = (action) => {
+      circular.name = 'mutated'
+      return action
+    }
+
+    const dispatch = middleware()(next)
+
+    expect(() => {
+      dispatch({ type: 'SOME_ACTION' })
+    }).toThrow(new RegExp('foo\\.circular\\.name'))
+  })
+
+  it('does not report shared references as mutations', () => {
+    const next: MWNext = (action) => action
+
+    const shared = { value: 'shared' }
+    Object.assign(state.foo, {
+      a: shared,
+      b: shared,
+      list: new Array(10).fill(shared),
+    })
+
+    const dispatch = middleware()(next)
+
+    expect(() => {
+      dispatch({ type: 'SOME_ACTION' })
+    }).not.toThrow()
+
+    expect(() => {
+      dispatch({ type: 'SOME_OTHER_ACTION' })
+    }).not.toThrow()
+  })
+
+  it('detects a mutation of a shared reference', () => {
+    const shared = { value: 'shared' }
+    Object.assign(state.foo, { a: shared, b: shared })
+
+    const next: MWNext = (action) => {
+      shared.value = 'mutated'
+      return action
+    }
+
+    const dispatch = middleware()(next)
+
+    expect(() => {
+      dispatch({ type: 'SOME_ACTION' })
+    }).toThrow(new RegExp('foo\\.a\\.value'))
+  })
+
+  it('respects "ignoredPaths" per path for shared references', () => {
+    const shared = { nested: { value: 'shared' } }
+    Object.assign(state.foo, { first: shared, second: shared })
+
+    const next: MWNext = (action) => {
+      shared.nested.value = 'mutated'
+      return action
+    }
+
+    const dispatch = middleware({ ignoredPaths: ['foo.first.nested'] })(next)
+
+    expect(() => {
+      dispatch({ type: 'SOME_ACTION' })
+    }).toThrow(new RegExp('foo\\.second\\.nested\\.value'))
+  })
+
   it('respects "isImmutable" option', function () {
     const isImmutable = (value: any) => true
-    const next: Dispatch = (action) => {
+    const next: MWNext = (action) => {
       state.foo.bar.push(5)
       return action
     }
@@ -116,51 +212,50 @@ describe('createImmutableStateInvariantMiddleware', () => {
   })
 
   it('respects "ignoredPaths" option', () => {
-    const next: Dispatch = (action) => {
+    const next: MWNext = (action) => {
       state.foo.bar.push(5)
       return action
     }
 
-    const dispatch = middleware({ ignoredPaths: ['foo.bar'] })(next)
+    const dispatch1 = middleware({ ignoredPaths: ['foo.bar'] })(next)
 
     expect(() => {
-      dispatch({ type: 'SOME_ACTION' })
+      dispatch1({ type: 'SOME_ACTION' })
     }).not.toThrow()
-  })
 
-  it('alias "ignore" to "ignoredPath" and respects option', () => {
-    const next: Dispatch = (action) => {
-      state.foo.bar.push(5)
-      return action
-    }
-
-    const dispatch = middleware({ ignore: ['foo.bar'] })(next)
+    const dispatch2 = middleware({ ignoredPaths: [/^foo/] })(next)
 
     expect(() => {
-      dispatch({ type: 'SOME_ACTION' })
+      dispatch2({ type: 'SOME_ACTION' })
     }).not.toThrow()
   })
 
   it('Should print a warning if execution takes too long', () => {
     state.foo.bar = new Array(10000).fill({ value: 'more' })
 
-    const next: Dispatch = (action) => action
+    const next: MWNext = (action) => action
 
     const dispatch = middleware({ warnAfter: 4 })(next)
 
-    const restore = mockConsole(createConsole())
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(noop)
+
     try {
       dispatch({ type: 'SOME_ACTION' })
-      expect(getLog().log).toMatch(
-        /^ImmutableStateInvariantMiddleware took \d*ms, which is more than the warning threshold of 4ms./
+
+      expect(consoleWarnSpy).toHaveBeenCalledOnce()
+
+      expect(consoleWarnSpy).toHaveBeenLastCalledWith(
+        expect.stringMatching(
+          /^ImmutableStateInvariantMiddleware took \d*ms, which is more than the warning threshold of 4ms./,
+        ),
       )
     } finally {
-      restore()
+      consoleWarnSpy.mockRestore()
     }
   })
 
   it('Should not print a warning if "next" takes too long', () => {
-    const next: Dispatch = (action) => {
+    const next: MWNext = (action) => {
       const started = Date.now()
       while (Date.now() - started < 8) {}
       return action
@@ -168,12 +263,14 @@ describe('createImmutableStateInvariantMiddleware', () => {
 
     const dispatch = middleware({ warnAfter: 4 })(next)
 
-    const restore = mockConsole(createConsole())
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(noop)
+
     try {
       dispatch({ type: 'SOME_ACTION' })
-      expect(getLog().log).toEqual('')
+
+      expect(consoleWarnSpy).not.toHaveBeenCalled()
     } finally {
-      restore()
+      consoleWarnSpy.mockRestore()
     }
   })
 })

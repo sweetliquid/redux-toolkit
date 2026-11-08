@@ -1,9 +1,11 @@
 import { joinUrls } from './utils'
-import { isPlainObject } from '@reduxjs/toolkit'
-import type { BaseQueryFn } from './baseQueryTypes'
+import { isPlainObject } from './core/rtkImports'
+import type { BaseQueryApi, BaseQueryFn } from './baseQueryTypes'
 import type { MaybePromise, Override } from './tsHelpers'
+import { anySignal, timeoutSignal } from './utils/signals'
 
 export type ResponseHandler =
+  | 'content-type'
   | 'json'
   | 'text'
   | ((response: Response) => Promise<any>)
@@ -25,6 +27,10 @@ export interface FetchArgs extends CustomRequestInit {
   body?: any
   responseHandler?: ResponseHandler
   validateStatus?: (response: Response, body: any) => boolean
+  /**
+   * A number in milliseconds that represents that maximum time a request can take before timing out.
+   */
+  timeout?: number
 }
 
 /**
@@ -37,26 +43,13 @@ const defaultFetchFn: typeof fetch = (...args) => fetch(...args)
 const defaultValidateStatus = (response: Response) =>
   response.status >= 200 && response.status <= 299
 
-const isJsonContentType = (headers: Headers) =>
-  headers.get('content-type')?.trim()?.startsWith('application/json')
+const defaultIsJsonContentType = (headers: Headers) =>
+  /*applicat*/ /ion\/(vnd\.api\+)?json/i.test(headers.get('content-type') || '')
 
-const handleResponse = async (
-  response: Response,
-  responseHandler: ResponseHandler
-) => {
-  if (typeof responseHandler === 'function') {
-    return responseHandler(response)
-  }
-
-  if (responseHandler === 'text') {
-    return response.text()
-  }
-
-  if (responseHandler === 'json') {
-    const text = await response.text()
-    return text.length ? JSON.parse(text) : undefined
-  }
-}
+const isTimeoutError = (error: unknown) =>
+  (error instanceof Error ||
+    (typeof DOMException !== 'undefined' && error instanceof DOMException)) &&
+  error.name === 'TimeoutError'
 
 export type FetchBaseQueryError =
   | {
@@ -70,7 +63,7 @@ export type FetchBaseQueryError =
   | {
       /**
        * * `"FETCH_ERROR"`:
-       *   An error that occured during execution of `fetch` or the `fetchFn` callback option
+       *   An error that occurred during execution of `fetch` or the `fetchFn` callback option
        **/
       status: 'FETCH_ERROR'
       data?: undefined
@@ -81,7 +74,7 @@ export type FetchBaseQueryError =
        * * `"PARSING_ERROR"`:
        *   An error happened during parsing.
        *   Most likely a non-JSON-response was returned with the default `responseHandler` "JSON",
-       *   or an error occured while executing a custom `responseHandler`.
+       *   or an error occurred while executing a custom `responseHandler`.
        **/
       status: 'PARSING_ERROR'
       originalStatus: number
@@ -90,8 +83,17 @@ export type FetchBaseQueryError =
     }
   | {
       /**
+       * * `"TIMEOUT_ERROR"`:
+       *   Request timed out
+       **/
+      status: 'TIMEOUT_ERROR'
+      data?: undefined
+      error: string
+    }
+  | {
+      /**
        * * `"CUSTOM_ERROR"`:
-       *   A custom error type that you can return from your `fetchFn` where another error might not make sense.
+       *   A custom error type that you can return from your `queryFn` where another error might not make sense.
        **/
       status: 'CUSTOM_ERROR'
       data?: unknown
@@ -104,24 +106,73 @@ function stripUndefined(obj: any) {
   }
   const copy: Record<string, any> = { ...obj }
   for (const [k, v] of Object.entries(copy)) {
-    if (typeof v === 'undefined') delete copy[k]
+    if (v === undefined) delete copy[k]
   }
   return copy
 }
+
+// Checks the toString tag rather than `instanceof` so bodies from another realm
+// (iframes, jsdom, a polyfilled fetch) are still recognized
+const hasToStringTag = (body: unknown, tag: string) =>
+  Object.prototype.toString.call(body) === `[object ${tag}]`
+
+// The runtime has to set the content-type for these: FormData needs its multipart
+// boundary, URLSearchParams gets the form-urlencoded type
+const needsRuntimeContentType = (body: unknown) =>
+  hasToStringTag(body, 'FormData') || hasToStringTag(body, 'URLSearchParams')
+
+// Only set the content-type to json if appropriate. Will not be true for FormData, ArrayBuffer, Blob, etc.
+const isJsonifiable = (body: any) =>
+  typeof body === 'object' &&
+  body !== null &&
+  (isPlainObject(body) ||
+    Array.isArray(body) ||
+    typeof body.toJSON === 'function')
 
 export type FetchBaseQueryArgs = {
   baseUrl?: string
   prepareHeaders?: (
     headers: Headers,
-    api: { getState: () => unknown }
-  ) => MaybePromise<Headers>
+    api: Pick<
+      BaseQueryApi,
+      'getState' | 'extra' | 'endpoint' | 'type' | 'forced' | 'startReason'
+    > & { arg: string | FetchArgs; extraOptions: unknown },
+  ) => MaybePromise<Headers | void>
   fetchFn?: (
     input: RequestInfo,
-    init?: RequestInit | undefined
+    init?: RequestInit | undefined,
   ) => Promise<Response>
-} & RequestInit
+  paramsSerializer?: (params: Record<string, any>) => string
+  /**
+   * By default, we only check for 'application/json' and 'application/vnd.api+json' as the content-types for json. If you need to support another format, you can pass
+   * in a predicate function for your given api to get the same automatic stringifying behavior
+   * @example
+   * ```ts
+   * const isJsonContentType = (headers: Headers) => ["application/vnd.api+json", "application/json", "application/vnd.hal+json"].includes((headers.get("content-type") ?? "").trim());
+   * ```
+   */
+  isJsonContentType?: (headers: Headers) => boolean
+  /**
+   * Defaults to `application/json`;
+   */
+  jsonContentType?: string
+
+  /**
+   * Custom replacer function used when calling `JSON.stringify()`;
+   */
+  jsonReplacer?: (this: any, key: string, value: any) => any
+} & RequestInit &
+  Pick<FetchArgs, 'responseHandler' | 'validateStatus' | 'timeout'>
 
 export type FetchBaseQueryMeta = { request: Request; response?: Response }
+
+export type FetchBaseQueryFn = BaseQueryFn<
+  string | FetchArgs,
+  unknown,
+  FetchBaseQueryError,
+  {},
+  FetchBaseQueryMeta
+>
 
 /**
  * This is a very small wrapper around fetch that aims to simplify requests.
@@ -143,12 +194,12 @@ export type FetchBaseQueryMeta = { request: Request; response?: Response }
  *
  * @param {string} baseUrl
  * The base URL for an API service.
- * Typically in the format of http://example.com/
+ * Typically in the format of https://example.com/
  *
- * @param {(headers: Headers, api: { getState: () => unknown }) => Headers} prepareHeaders
+ * @param {(headers: Headers, api: { getState: () => unknown; arg: string | FetchArgs; extra: unknown; endpoint: string; type: 'query' | 'mutation'; forced: boolean; startReason: QueryStartReason; }) => Headers} prepareHeaders
  * An optional function that can be used to inject headers on requests.
- * Provides a Headers object, as well as the `getState` function from the
- * redux store. Can be useful for authentication.
+ * Provides a Headers object, most of the `BaseQueryApi` (`dispatch` is not available), and the arg passed into the query function.
+ * Useful for setting authentication or headers that need to be set conditionally.
  *
  * @link https://developer.mozilla.org/en-US/docs/Web/API/Headers
  *
@@ -156,126 +207,215 @@ export type FetchBaseQueryMeta = { request: Request; response?: Response }
  * Accepts a custom `fetch` function if you do not want to use the default on the window.
  * Useful in SSR environments if you need to use a library such as `isomorphic-fetch` or `cross-fetch`
  *
+ * @param {(params: Record<string, unknown>) => string} paramsSerializer
+ * An optional function that can be used to stringify querystring parameters.
+ *
+ * @param {(headers: Headers) => boolean} isJsonContentType
+ * An optional predicate function to determine if `JSON.stringify()` should be called on the `body` arg of `FetchArgs`
+ *
+ * @param {string} jsonContentType Used when automatically setting the content-type header for a request with a jsonifiable body that does not have an explicit content-type header. Defaults to `application/json`.
+ *
+ * @param {(this: any, key: string, value: any) => any} jsonReplacer Custom replacer function used when calling `JSON.stringify()`.
+ *
+ * @param {number} timeout
+ * A number in milliseconds that represents the maximum time a request can take before timing out.
  */
+
 export function fetchBaseQuery({
   baseUrl,
   prepareHeaders = (x) => x,
   fetchFn = defaultFetchFn,
+  paramsSerializer,
+  isJsonContentType = defaultIsJsonContentType,
+  jsonContentType = 'application/json',
+  jsonReplacer,
+  timeout: defaultTimeout,
+  responseHandler: globalResponseHandler,
+  validateStatus: globalValidateStatus,
   ...baseFetchOptions
-}: FetchBaseQueryArgs = {}): BaseQueryFn<
-  string | FetchArgs,
-  unknown,
-  FetchBaseQueryError,
-  {},
-  FetchBaseQueryMeta
-> {
+}: FetchBaseQueryArgs = {}): FetchBaseQueryFn {
   if (typeof fetch === 'undefined' && fetchFn === defaultFetchFn) {
     console.warn(
-      'Warning: `fetch` is not available. Please supply a custom `fetchFn` property to use `fetchBaseQuery` on SSR environments.'
+      'Warning: `fetch` is not available. Please supply a custom `fetchFn` property to use `fetchBaseQuery` on SSR environments.',
     )
   }
-  return async (arg, { signal, getState }) => {
+  return async (arg, api, extraOptions) => {
+    const { getState, extra, endpoint, forced, type, startReason } = api
     let meta: FetchBaseQueryMeta | undefined
     let {
       url,
-      method = 'GET' as const,
-      headers = new Headers({}),
-      body = undefined,
+      headers = new Headers(baseFetchOptions.headers),
       params = undefined,
-      responseHandler = 'json' as const,
-      validateStatus = defaultValidateStatus,
+      responseHandler = globalResponseHandler ?? ('json' as const),
+      validateStatus = globalValidateStatus ?? defaultValidateStatus,
+      timeout = defaultTimeout,
       ...rest
     } = typeof arg == 'string' ? { url: arg } : arg
-    let config: RequestInit = {
-      ...baseFetchOptions,
-      method,
-      signal,
-      body,
-      ...rest,
-    }
 
-    config.headers = await prepareHeaders(
-      new Headers(stripUndefined(headers)),
-      { getState }
-    )
-
-    // Only set the content-type to json if appropriate. Will not be true for FormData, ArrayBuffer, Blob, etc.
-    const isJsonifiable = (body: any) =>
-      typeof body === 'object' &&
-      (isPlainObject(body) ||
-        Array.isArray(body) ||
-        typeof body.toJSON === 'function')
-
-    if (!config.headers.has('content-type') && isJsonifiable(body)) {
-      config.headers.set('content-type', 'application/json')
-    }
-
-    if (body && isJsonContentType(config.headers)) {
-      config.body = JSON.stringify(body)
-    }
-
-    if (params) {
-      const divider = ~url.indexOf('?') ? '&' : '?'
-      const query = new URLSearchParams(stripUndefined(params))
-      url += divider + query
-    }
-
-    url = joinUrls(baseUrl, url)
-
-    const request = new Request(url, config)
-    const requestClone = request.clone()
-    meta = { request: requestClone }
-
-    let response
+    const timeoutController = timeout ? timeoutSignal(timeout) : undefined
     try {
-      response = await fetchFn(request)
-    } catch (e) {
-      return { error: { status: 'FETCH_ERROR', error: String(e) }, meta }
-    }
-    const responseClone = response.clone()
-
-    meta.response = responseClone
-
-    let resultData: any
-    let responseText: string = ''
-    try {
-      let handleResponseError
-      await Promise.all([
-        handleResponse(response, responseHandler).then(
-          (r) => (resultData = r),
-          (e) => (handleResponseError = e)
-        ),
-        // see https://github.com/node-fetch/node-fetch/issues/665#issuecomment-538995182
-        // we *have* to "use up" both streams at the same time or they will stop running in node-fetch scenarios
-        responseClone.text().then(
-          (r) => (responseText = r),
-          () => {}
-        ),
-      ])
-      if (handleResponseError) throw handleResponseError
-    } catch (e) {
-      return {
-        error: {
-          status: 'PARSING_ERROR',
-          originalStatus: response.status,
-          data: responseText,
-          error: String(e),
-        },
-        meta,
+      let config: RequestInit = {
+        ...baseFetchOptions,
+        signal: timeoutController
+          ? anySignal(api.signal, timeoutController.signal)
+          : api.signal,
+        ...rest,
       }
-    }
 
-    return validateStatus(response, resultData)
-      ? {
-          data: resultData,
-          meta,
+      headers = new Headers(stripUndefined(headers))
+      config.headers =
+        (await prepareHeaders(headers, {
+          getState,
+          arg,
+          extra,
+          endpoint,
+          forced,
+          type,
+          startReason,
+          extraOptions,
+        })) || headers
+
+      const bodyIsJsonifiable = isJsonifiable(config.body)
+
+      // For non-jsonifiable bodies, remove content-type when the runtime has to set it
+      // (FormData, URLSearchParams) or when it's a JSON type that doesn't fit the body
+      // (e.g. set for every request in prepareHeaders). Other explicit types are kept, so binary
+      // uploads can send e.g. application/octet-stream. String bodies keep theirs (text/plain, text/html, etc.)
+      if (
+        config.body != null &&
+        !bodyIsJsonifiable &&
+        typeof config.body !== 'string' &&
+        (needsRuntimeContentType(config.body) ||
+          defaultIsJsonContentType(config.headers) ||
+          isJsonContentType(config.headers))
+      ) {
+        config.headers.delete('content-type')
+      }
+
+      if (!config.headers.has('content-type') && bodyIsJsonifiable) {
+        config.headers.set('content-type', jsonContentType)
+      }
+
+      if (bodyIsJsonifiable && isJsonContentType(config.headers)) {
+        config.body = JSON.stringify(config.body, jsonReplacer)
+      }
+
+      // Set Accept header based on responseHandler if not already set
+      if (!config.headers.has('accept')) {
+        if (responseHandler === 'json') {
+          config.headers.set('accept', 'application/json')
+        } else if (responseHandler === 'text') {
+          config.headers.set('accept', 'text/plain, text/html, */*')
         }
-      : {
+        // For 'content-type' responseHandler, don't set Accept (let server decide)
+      }
+
+      if (params) {
+        const divider = ~url.indexOf('?') ? '&' : '?'
+        const query = paramsSerializer
+          ? paramsSerializer(params)
+          : new URLSearchParams(stripUndefined(params))
+        url += divider + query
+      }
+
+      url = joinUrls(baseUrl, url)
+
+      const request = new Request(url, config)
+      const requestClone = new Request(url, config)
+      meta = { request: requestClone }
+
+      let response
+      try {
+        response = await fetchFn(request)
+      } catch (e) {
+        return {
           error: {
-            status: response.status,
-            data: resultData,
+            status: isTimeoutError(e) ? 'TIMEOUT_ERROR' : 'FETCH_ERROR',
+            error: String(e),
           },
           meta,
         }
+      }
+      const responseClone = response.clone()
+
+      meta.response = responseClone
+
+      let resultData: any
+      let responseText: string = ''
+      try {
+        let handleResponseError
+        let responseHandlerFailed = false
+        await Promise.all([
+          handleResponse(response, responseHandler).then(
+            (r) => (resultData = r),
+            (e) => {
+              responseHandlerFailed = true
+              handleResponseError = e
+            },
+          ),
+          // see https://github.com/node-fetch/node-fetch/issues/665#issuecomment-538995182
+          // we *have* to "use up" both streams at the same time or they will stop running in node-fetch scenarios
+          responseClone.text().then(
+            (r) => (responseText = r),
+            () => {},
+          ),
+        ])
+        if (responseHandlerFailed) throw handleResponseError
+      } catch (e) {
+        if (config.signal?.aborted && isTimeoutError(config.signal.reason)) {
+          return {
+            error: {
+              status: 'TIMEOUT_ERROR',
+              error: String(config.signal.reason),
+            },
+            meta,
+          }
+        }
+        return {
+          error: {
+            status: 'PARSING_ERROR',
+            originalStatus: response.status,
+            data: responseText,
+            error: String(e),
+          },
+          meta,
+        }
+      }
+
+      return validateStatus(response, resultData)
+        ? {
+            data: resultData,
+            meta,
+          }
+        : {
+            error: {
+              status: response.status,
+              data: resultData,
+            },
+            meta,
+          }
+    } finally {
+      timeoutController?.clear()
+    }
+  }
+
+  async function handleResponse(
+    response: Response,
+    responseHandler: ResponseHandler,
+  ) {
+    if (typeof responseHandler === 'function') {
+      return responseHandler(response)
+    }
+
+    if (responseHandler === 'content-type') {
+      responseHandler = isJsonContentType(response.headers) ? 'json' : 'text'
+    }
+
+    if (responseHandler === 'json') {
+      const text = await response.text()
+      return text.length ? JSON.parse(text) : null
+    }
+
+    return response.text()
   }
 }

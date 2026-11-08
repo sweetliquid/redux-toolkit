@@ -17,6 +17,7 @@ Each endpoint structure contains the following fields:
 type EndpointLogic = {
   initiate: InitiateRequestThunk
   select: CreateCacheSelectorFactory
+  getRunningQuery: GetRunningQuery // queries and infinite queries only
   matchPending: Matcher<PendingAction>
   matchFulfilled: Matcher<FulfilledAction>
   matchRejected: Matcher<RejectedAction>
@@ -33,18 +34,21 @@ type InitiateRequestThunk = StartQueryActionCreator | StartMutationActionCreator
 type StartQueryActionCreator = (
   arg:any,
   options?: StartQueryActionCreatorOptions
-) => ThunkAction<QueryActionCreatorResult, any, any, AnyAction>;
+) => ThunkAction<QueryActionCreatorResult, any, any, UnknownAction>;
 
 type StartMutationActionCreator<D extends MutationDefinition<any, any, any, any>> = (
   arg: any
   options?: StartMutationActionCreatorOptions
-) => ThunkAction<MutationActionCreatorResult<D>, any, any, AnyAction>;
+) => ThunkAction<MutationActionCreatorResult<D>, any, any, UnknownAction>;
 
 type SubscriptionOptions = {
   /**
    * How frequently to automatically re-fetch data (in milliseconds). Defaults to `0` (off).
+   *
+   * Can also be a function that receives the current cache entry and returns the interval.
+   * See [Polling](../../usage/polling.mdx#computing-the-interval-from-the-cache-entry).
    */
-  pollingInterval?: number;
+  pollingInterval?: number | ((cacheEntry: QueryCacheEntry) => number);
   /**
    * Defaults to `false`. This setting allows you to control whether RTK Query will try to refetch all subscribed queries after regaining a network connection.
    *
@@ -67,6 +71,12 @@ interface StartQueryActionCreatorOptions {
   subscribe?: boolean;
   forceRefetch?: boolean | number;
   subscriptionOptions?: SubscriptionOptions;
+  /**
+   * Keep the cache entry for at least this many seconds after its last
+   * subscriber leaves. The entry is kept for
+   * `Math.max(keepUnusedDataFor, retainFor)` seconds.
+   */
+  retainFor?: number;
 }
 
 interface StartMutationActionCreatorOptions {
@@ -87,12 +97,24 @@ A Redux thunk action creator that you can dispatch to trigger data fetch queries
 React Hooks users will most likely never need to use these directly, as the hooks automatically dispatch these actions as needed.
 
 :::note Usage of actions outside of React Hooks
-When dispatching an action creator, you're responsible for storing a reference to the promise it returns in the event that you want to update that specific subscription. Also, you have to manually unsubscribe once your component unmounts. To get an idea of what that entails, see the [Svelte Example](../../usage/examples.mdx#svelte) or the [React Class Components Example](../../usage/examples.mdx#react-class-components)
+When dispatching an action creator, you're responsible for storing a reference to the promise it returns in the event that you want to update that specific subscription. Also, you have to manually unsubscribe once your component unmounts. To get an idea of what that entails, see the [Svelte Example](../../usage/examples.mdx#svelte) or the [Usage Without React Hooks](../../usage/usage-without-react-hooks.mdx) page
 :::
+
+The result of dispatching a query `initiate` thunk is a promise with extra fields, including `unwrap()`, `refetch()`, `unsubscribe()`, `updateSubscriptionOptions()`, and `isSubscribed()`.
+`isSubscribed()` returns whether this particular request still holds a subscription in the store. It returns `false` after `unsubscribe()` is called, after `resetApiState`, and for requests started with `subscribe: false`.
+
+`retainFor` keeps a cache entry around after its last subscriber leaves, without changing the endpoint's `keepUnusedDataFor`. This is useful for prefetching or `subscribe: false` requests whose data will be read soon. The entry is removed after `Math.max(keepUnusedDataFor, retainFor)` seconds. Values under one second are raised to one second. When several requests pass `retainFor` for the same entry, the longest value is used until the entry is removed. Dispatching `initiate` with `retainFor` for an entry that is already cached restarts its removal timer.
+
+```ts no-transpile
+// Fetch now, and keep the data for 60 seconds even if nothing subscribes
+dispatch(
+  api.endpoints.getPost.initiate(id, { subscribe: false, retainFor: 60 }),
+)
+```
 
 #### Example
 
-```tsx title="initiate query example"
+```tsx no-transpile title="initiate query example"
 import { useState } from 'react'
 import { useAppDispatch } from './store/hooks'
 import { api } from './services/api'
@@ -119,7 +141,7 @@ function App() {
 }
 ```
 
-```tsx title="initiate mutation example"
+```tsx no-transpile title="initiate mutation example"
 import { useState } from 'react'
 import { useAppDispatch } from './store/hooks'
 import { api, Post } from './services/api'
@@ -146,24 +168,48 @@ function App() {
 }
 ```
 
+## `getRunningQuery`
+
+#### Signature
+
+```ts no-transpile
+type GetRunningQuery = (
+  arg: any,
+) => ThunkAction<QueryActionCreatorResult | undefined, any, any, UnknownAction>
+```
+
+#### Description
+
+A thunk action creator for query and infinite query endpoints. Dispatching it returns the promise of the request currently running for that cache entry, or `undefined` if no request is running.
+
+The returned promise is the same one that the `initiate` call which started the request returned. Awaiting it does not add a subscription. This is the typed per-endpoint form of [`api.util.getRunningQueryThunk`](./api-slice-utils.mdx#getrunningquerythunk-and-getrunningmutationthunk).
+
+#### Example
+
+```ts no-transpile
+const running = dispatch(api.endpoints.getPost.getRunningQuery(id))
+if (running) {
+  const { data } = await running
+}
+```
+
 ## `select`
 
 #### Signature
 
 ```ts no-transpile
 type CreateCacheSelectorFactory =
-  | QueryResultSelectorFactory
-  | MutationResultSelectorFactory
+  QueryResultSelectorFactory | MutationResultSelectorFactory
 
 type QueryResultSelectorFactory = (
-  queryArg: QueryArg | SkipToken
+  queryArg: QueryArg | SkipToken,
 ) => (state: RootState) => QueryResultSelectorResult<Definition>
 
 type MutationResultSelectorFactory<
   Definition extends MutationDefinition<any, any, any, any>,
-  RootState
+  RootState,
 > = (
-  requestId: string | SkipToken
+  requestId: string | SkipToken,
 ) => (state: RootState) => MutationSubState<Definition> & RequestStatusFlags
 
 type SkipToken = typeof Symbol
@@ -187,7 +233,7 @@ Each call to `.select(someCacheKey)` returns a _new_ selector function instance.
 
 #### Example
 
-```tsx title="select query example"
+```tsx no-transpile title="select query example"
 import { useState, useMemo } from 'react'
 import { useAppDispatch, useAppSelector } from './store/hooks'
 import { api } from './services/api'
@@ -198,9 +244,10 @@ function App() {
   // highlight-start
   // useMemo is used to only call `.select()` when required.
   // Each call will create a new selector function instance
-  const selectPost = useMemo(() => api.endpoints.getPost.select(postId), [
-    postId,
-  ])
+  const selectPost = useMemo(
+    () => api.endpoints.getPost.select(postId),
+    [postId],
+  )
   const { data, isLoading } = useAppSelector(selectPost)
   // highlight-end
 
@@ -223,7 +270,7 @@ function App() {
 }
 ```
 
-```tsx title="select mutation example"
+```tsx no-transpile title="select mutation example"
 import { useState, useMemo } from 'react'
 import { skipToken } from '@reduxjs/toolkit/query'
 import { useAppDispatch, useAppSelector } from './store/hooks'
@@ -233,14 +280,14 @@ function App() {
   const dispatch = useAppDispatch()
   const [newPost, setNewPost] = useState({ name: 'Ash' })
   const [requestId, setRequestId] = useState<typeof skipToken | string>(
-    skipToken
+    skipToken,
   )
   // highlight-start
   // useMemo is used to only call `.select(..)` when required.
   // Each call will create a new selector function instance
   const selectMutationResult = useMemo(
     () => api.endpoints.addPost.select(requestId),
-    [requestId]
+    [requestId],
   )
   const { isLoading } = useAppSelector(selectMutationResult)
   // highlight-end

@@ -2,14 +2,70 @@ import type {
   ThunkDispatch,
   ActionCreatorWithoutPayload, // Workaround for API-Extractor
 } from '@reduxjs/toolkit'
-import { createAction } from '@reduxjs/toolkit'
+import { createAction } from './rtkImports'
 
-export const onFocus = /* @__PURE__ */ createAction('__rtkq/focused')
-export const onFocusLost = /* @__PURE__ */ createAction('__rtkq/unfocused')
-export const onOnline = /* @__PURE__ */ createAction('__rtkq/online')
-export const onOffline = /* @__PURE__ */ createAction('__rtkq/offline')
+export const INTERNAL_PREFIX = '__rtkq/'
 
-let initialized = false
+const ONLINE = 'online'
+const OFFLINE = 'offline'
+const FOCUS = 'focus'
+const FOCUSED = 'focused'
+const VISIBILITYCHANGE = 'visibilitychange'
+
+export const onFocus = /* @__PURE__ */ createAction(
+  `${INTERNAL_PREFIX}${FOCUSED}`,
+)
+export const onFocusLost = /* @__PURE__ */ createAction(
+  `${INTERNAL_PREFIX}un${FOCUSED}`,
+)
+export const onOnline = /* @__PURE__ */ createAction(
+  `${INTERNAL_PREFIX}${ONLINE}`,
+)
+export const onOffline = /* @__PURE__ */ createAction(
+  `${INTERNAL_PREFIX}${OFFLINE}`,
+)
+
+const actions = {
+  onFocus,
+  onFocusLost,
+  onOnline,
+  onOffline,
+}
+
+type AnyDispatch = ThunkDispatch<any, any, any>
+
+// Each registered dispatch, with the number of `setupListeners` calls
+// that are still subscribed for it.
+const registeredDispatches = new Map<AnyDispatch, number>()
+
+const dispatchToAll = (actionCreator: () => { type: string }) => {
+  for (const dispatch of [...registeredDispatches.keys()]) {
+    dispatch(actionCreator())
+  }
+}
+
+const windowHandlers = {
+  [FOCUS]: () => dispatchToAll(onFocus),
+  [VISIBILITYCHANGE]: () => {
+    if (window.document.visibilityState === 'visible') {
+      dispatchToAll(onFocus)
+    } else {
+      dispatchToAll(onFocusLost)
+    }
+  },
+  [ONLINE]: () => dispatchToAll(onOnline),
+  [OFFLINE]: () => dispatchToAll(onOffline),
+}
+
+function updateWindowListeners(add: boolean) {
+  Object.entries(windowHandlers).forEach(([event, handler]) => {
+    if (add) {
+      window.addEventListener(event, handler, false)
+    } else {
+      window.removeEventListener(event, handler)
+    }
+  })
+}
 
 /**
  * A utility used to enable `refetchOnMount` and `refetchOnReconnect` behaviors.
@@ -36,49 +92,38 @@ export function setupListeners(
       onFocusLost: typeof onFocusLost
       onOnline: typeof onOnline
       onOffline: typeof onOffline
-    }
-  ) => () => void
+    },
+  ) => () => void,
 ) {
   function defaultHandler() {
-    const handleFocus = () => dispatch(onFocus())
-    const handleFocusLost = () => dispatch(onFocusLost())
-    const handleOnline = () => dispatch(onOnline())
-    const handleOffline = () => dispatch(onOffline())
-    const handleVisibilityChange = () => {
-      if (window.document.visibilityState === 'visible') {
-        handleFocus()
-      } else {
-        handleFocusLost()
-      }
+    if (typeof window === 'undefined' || !window.addEventListener) {
+      return () => {}
     }
 
-    if (!initialized) {
-      if (typeof window !== 'undefined' && window.addEventListener) {
-        // Handle focus events
-        window.addEventListener(
-          'visibilitychange',
-          handleVisibilityChange,
-          false
-        )
-        window.addEventListener('focus', handleFocus, false)
+    if (registeredDispatches.size === 0) {
+      updateWindowListeners(true)
+    }
+    registeredDispatches.set(
+      dispatch,
+      (registeredDispatches.get(dispatch) ?? 0) + 1,
+    )
 
-        // Handle connection events
-        window.addEventListener('online', handleOnline, false)
-        window.addEventListener('offline', handleOffline, false)
-        initialized = true
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+
+      const count = registeredDispatches.get(dispatch) ?? 0
+      if (count > 1) {
+        registeredDispatches.set(dispatch, count - 1)
+        return
+      }
+      registeredDispatches.delete(dispatch)
+      if (registeredDispatches.size === 0) {
+        updateWindowListeners(false)
       }
     }
-    const unsubscribe = () => {
-      window.removeEventListener('focus', handleFocus)
-      window.removeEventListener('visibilitychange', handleVisibilityChange)
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-      initialized = false
-    }
-    return unsubscribe
   }
 
-  return customHandler
-    ? customHandler(dispatch, { onFocus, onFocusLost, onOffline, onOnline })
-    : defaultHandler()
+  return customHandler ? customHandler(dispatch, actions) : defaultHandler()
 }

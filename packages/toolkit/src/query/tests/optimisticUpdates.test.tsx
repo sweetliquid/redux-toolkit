@@ -1,6 +1,12 @@
 import { createApi } from '@reduxjs/toolkit/query/react'
-import { actionsReducer, hookWaitFor, setupApiStore, waitMs } from './helpers'
-import { renderHook, act } from '@testing-library/react-hooks'
+import { act, renderHook } from '@testing-library/react'
+import { delay } from 'msw'
+import {
+  actionsReducer,
+  hookWaitFor,
+  setupApiStore,
+} from '../../tests/utils/helpers'
+import type { InvalidationState } from '../core/apiState'
 
 interface Post {
   id: string
@@ -8,14 +14,18 @@ interface Post {
   contents: string
 }
 
-const baseQuery = jest.fn()
-beforeEach(() => baseQuery.mockReset())
+const baseQuery = vi.fn()
+beforeEach(() => {
+  baseQuery.mockReset()
+})
 
 const api = createApi({
   baseQuery: (...args: any[]) => {
     const result = baseQuery(...args)
-    if ('then' in result)
-      return result.then((data: any) => ({ data, meta: 'meta' }))
+    if (typeof result === 'object' && 'then' in result)
+      return result
+        .then((data: any) => ({ data, meta: 'meta' }))
+        .catch((e: any) => ({ error: e }))
     return { data: result, meta: 'meta' }
   },
   tagTypes: ['Post'],
@@ -23,6 +33,13 @@ const api = createApi({
     post: build.query<Post, string>({
       query: (id) => `post/${id}`,
       providesTags: ['Post'],
+    }),
+    listPosts: build.query<Post[], void>({
+      query: () => `posts`,
+      providesTags: (result) => [
+        ...(result?.map(({ id }) => ({ type: 'Post' as const, id })) ?? []),
+        'Post',
+      ],
     }),
     updatePost: build.mutation<void, Pick<Post, 'id'> & Partial<Post>>({
       query: ({ id, ...patch }) => ({
@@ -34,23 +51,21 @@ const api = createApi({
         const { undo } = dispatch(
           api.util.updateQueryData('post', id, (draft) => {
             Object.assign(draft, patch)
-          })
+          }),
         )
         queryFulfilled.catch(undo)
       },
-      invalidatesTags: ['Post'],
+      invalidatesTags: (result) => (result ? ['Post'] : []),
     }),
   }),
 })
 
-const storeRef = setupApiStore(api, {
-  ...actionsReducer,
-})
+const storeRef = setupApiStore(api, { ...actionsReducer })
 
 describe('basic lifecycle', () => {
-  let onStart = jest.fn(),
-    onError = jest.fn(),
-    onSuccess = jest.fn()
+  let onStart = vi.fn(),
+    onError = vi.fn(),
+    onSuccess = vi.fn()
 
   const extendedApi = api.injectEndpoints({
     endpoints: (build) => ({
@@ -79,9 +94,7 @@ describe('basic lifecycle', () => {
   test('success', async () => {
     const { result } = renderHook(
       () => extendedApi.endpoints.test.useMutation(),
-      {
-        wrapper: storeRef.wrapper,
-      }
+      { wrapper: storeRef.wrapper },
     )
 
     baseQuery.mockResolvedValue('success')
@@ -94,7 +107,7 @@ describe('basic lifecycle', () => {
 
     expect(onError).not.toHaveBeenCalled()
     expect(onSuccess).not.toHaveBeenCalled()
-    await act(() => waitMs(5))
+    await act(() => delay(5))
     expect(onError).not.toHaveBeenCalled()
     expect(onSuccess).toHaveBeenCalledWith({ data: 'success', meta: 'meta' })
   })
@@ -102,25 +115,23 @@ describe('basic lifecycle', () => {
   test('error', async () => {
     const { result } = renderHook(
       () => extendedApi.endpoints.test.useMutation(),
-      {
-        wrapper: storeRef.wrapper,
-      }
+      { wrapper: storeRef.wrapper },
     )
 
-    baseQuery.mockRejectedValue('error')
-
+    baseQuery.mockRejectedValueOnce('error')
     expect(onStart).not.toHaveBeenCalled()
     expect(baseQuery).not.toHaveBeenCalled()
+
     act(() => void result.current[0]('arg'))
     expect(onStart).toHaveBeenCalledWith('arg')
     expect(baseQuery).toHaveBeenCalledWith('arg', expect.any(Object), undefined)
-
     expect(onError).not.toHaveBeenCalled()
     expect(onSuccess).not.toHaveBeenCalled()
-    await act(() => waitMs(5))
+    await act(() => delay(5))
     expect(onError).toHaveBeenCalledWith({
-      error: { message: 'error' },
-      isUnhandledError: true,
+      error: 'error',
+      isUnhandledError: false,
+      meta: undefined,
     })
     expect(onSuccess).not.toHaveBeenCalled()
   })
@@ -128,11 +139,16 @@ describe('basic lifecycle', () => {
 
 describe('updateQueryData', () => {
   test('updates cache values, can apply inverse patch', async () => {
-    baseQuery.mockResolvedValueOnce({
-      id: '3',
-      title: 'All about cheese.',
-      contents: 'TODO',
-    })
+    baseQuery
+      .mockResolvedValueOnce({
+        id: '3',
+        title: 'All about cheese.',
+        contents: 'TODO',
+      })
+      // TODO I have no idea why the query is getting called multiple times,
+      // but passing an additional mocked value (_any_ value)
+      // seems to silence some annoying "got an undefined result" logging
+      .mockResolvedValueOnce(42)
     const { result } = renderHook(() => api.endpoints.post.useQuery('3'), {
       wrapper: storeRef.wrapper,
     })
@@ -150,7 +166,7 @@ describe('updateQueryData', () => {
       returnValue = storeRef.store.dispatch(
         api.util.updateQueryData('post', '3', (draft) => {
           draft.contents = 'I love cheese!'
-        })
+        }),
       )
     })
 
@@ -169,19 +185,187 @@ describe('updateQueryData', () => {
 
     act(() => {
       storeRef.store.dispatch(
-        api.util.patchQueryResult('post', '3', returnValue.inversePatches)
+        api.util.patchQueryData('post', '3', returnValue.inversePatches),
       )
     })
 
     expect(result.current.data).toEqual(dataBefore)
   })
 
-  test('does not update non-existing values', async () => {
-    baseQuery.mockResolvedValueOnce({
+  test('updates hook data while a refetch is in flight', async () => {
+    let resolveRefetch!: (value: Post) => void
+    const refetchPromise = new Promise<Post>((resolve) => {
+      resolveRefetch = resolve
+    })
+
+    baseQuery
+      .mockResolvedValueOnce({
+        id: '3',
+        title: 'All about cheese.',
+        contents: 'TODO',
+      })
+      .mockReturnValueOnce(refetchPromise)
+
+    const { result } = renderHook(() => api.endpoints.post.useQuery('3'), {
+      wrapper: storeRef.wrapper,
+    })
+    await hookWaitFor(() => expect(result.current.isSuccess).toBeTruthy())
+
+    act(() => {
+      void result.current.refetch()
+    })
+    await hookWaitFor(() => expect(result.current.isFetching).toBe(true))
+
+    act(() => {
+      storeRef.store.dispatch(
+        api.util.updateQueryData('post', '3', (draft) => {
+          draft.contents = 'I love cheese!'
+        }),
+      )
+    })
+
+    expect(result.current.currentData).toEqual({
       id: '3',
       title: 'All about cheese.',
-      contents: 'TODO',
+      contents: 'I love cheese!',
     })
+    expect(result.current.data).toEqual({
+      id: '3',
+      title: 'All about cheese.',
+      contents: 'I love cheese!',
+    })
+
+    await act(async () => {
+      resolveRefetch({
+        id: '3',
+        title: 'All about cheese.',
+        contents: 'Refetched',
+      })
+      await refetchPromise
+    })
+  })
+
+  test('updates (list) cache values including provided tags, undos that', async () => {
+    baseQuery
+      .mockResolvedValueOnce([
+        { id: '3', title: 'All about cheese.', contents: 'TODO' },
+      ])
+      .mockResolvedValueOnce(42)
+    const { result } = renderHook(() => api.endpoints.listPosts.useQuery(), {
+      wrapper: storeRef.wrapper,
+    })
+    await hookWaitFor(() => expect(result.current.isSuccess).toBeTruthy())
+
+    let provided!: InvalidationState<'Post'>
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    const provided3 = provided.tags.Post['3']
+
+    let returnValue!: ReturnType<ReturnType<typeof api.util.updateQueryData>>
+    act(() => {
+      returnValue = storeRef.store.dispatch(
+        api.util.updateQueryData(
+          'listPosts',
+          undefined,
+          (draft) => {
+            draft.push({
+              id: '4',
+              title: 'Mostly about cheese.',
+              contents: 'TODO',
+            })
+          },
+          true,
+        ),
+      )
+    })
+
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    const provided4 = provided.tags.Post['4']
+
+    expect(provided4).toEqual(provided3)
+
+    act(() => {
+      returnValue.undo()
+    })
+
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    const provided4Next = provided.tags.Post['4']
+
+    expect(provided4Next).toEqual([])
+  })
+
+  test('updates (list) cache values excluding provided tags, undoes that', async () => {
+    baseQuery
+      .mockResolvedValueOnce([
+        { id: '3', title: 'All about cheese.', contents: 'TODO' },
+      ])
+      .mockResolvedValueOnce(42)
+    const { result } = renderHook(() => api.endpoints.listPosts.useQuery(), {
+      wrapper: storeRef.wrapper,
+    })
+    await hookWaitFor(() => expect(result.current.isSuccess).toBeTruthy())
+
+    let provided!: InvalidationState<'Post'>
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    let returnValue!: ReturnType<ReturnType<typeof api.util.updateQueryData>>
+    act(() => {
+      returnValue = storeRef.store.dispatch(
+        api.util.updateQueryData(
+          'listPosts',
+          undefined,
+          (draft) => {
+            draft.push({
+              id: '4',
+              title: 'Mostly about cheese.',
+              contents: 'TODO',
+            })
+          },
+          false,
+        ),
+      )
+    })
+
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    const provided4 = provided.tags.Post['4']
+
+    expect(provided4).toEqual(undefined)
+
+    act(() => {
+      returnValue.undo()
+    })
+
+    act(() => {
+      provided = storeRef.store.getState().api.provided
+    })
+
+    const provided4Next = provided.tags.Post['4']
+
+    expect(provided4Next).toEqual(undefined)
+  })
+
+  test('does not update non-existing values', async () => {
+    baseQuery
+      .mockImplementationOnce(async () => ({
+        id: '3',
+        title: 'All about cheese.',
+        contents: 'TODO',
+      }))
+      .mockResolvedValueOnce(42)
+
     const { result } = renderHook(() => api.endpoints.post.useQuery('3'), {
       wrapper: storeRef.wrapper,
     })
@@ -199,7 +383,7 @@ describe('updateQueryData', () => {
       returnValue = storeRef.store.dispatch(
         api.util.updateQueryData('post', '4', (draft) => {
           draft.contents = 'I love cheese!'
-        })
+        }),
       )
     })
 
@@ -231,14 +415,13 @@ describe('full integration', () => {
         title: 'Meanwhile, this changed server-side.',
         contents: 'Delicious cheese!',
       })
+      .mockResolvedValueOnce(42)
     const { result } = renderHook(
       () => ({
         query: api.endpoints.post.useQuery('3'),
         mutation: api.endpoints.updatePost.useMutation(),
       }),
-      {
-        wrapper: storeRef.wrapper,
-      }
+      { wrapper: storeRef.wrapper },
     )
     await hookWaitFor(() => expect(result.current.query.isSuccess).toBeTruthy())
 
@@ -263,7 +446,7 @@ describe('full integration', () => {
         id: '3',
         title: 'Meanwhile, this changed server-side.',
         contents: 'Delicious cheese!',
-      })
+      }),
     )
   })
 
@@ -280,15 +463,14 @@ describe('full integration', () => {
         title: 'Meanwhile, this changed server-side.',
         contents: 'TODO',
       })
+      .mockResolvedValueOnce(42)
 
     const { result } = renderHook(
       () => ({
         query: api.endpoints.post.useQuery('3'),
         mutation: api.endpoints.updatePost.useMutation(),
       }),
-      {
-        wrapper: storeRef.wrapper,
-      }
+      { wrapper: storeRef.wrapper },
     )
     await hookWaitFor(() => expect(result.current.query.isSuccess).toBeTruthy())
 
@@ -315,7 +497,7 @@ describe('full integration', () => {
         id: '3',
         title: 'All about cheese.',
         contents: 'TODO',
-      })
+      }),
     )
 
     // mutation failed - will not invalidate query and not refetch data from the server
@@ -327,8 +509,8 @@ describe('full integration', () => {
             title: 'Meanwhile, this changed server-side.',
             contents: 'TODO',
           }),
-        50
-      )
+        50,
+      ),
     ).rejects.toBeTruthy()
 
     act(() => void result.current.query.refetch())
@@ -341,7 +523,108 @@ describe('full integration', () => {
           title: 'Meanwhile, this changed server-side.',
           contents: 'TODO',
         }),
-      50
+      50,
     )
+  })
+})
+
+describe('updateQueryData patch results', () => {
+  class Counter {
+    constructor(public value: number) {}
+  }
+
+  const providesTagsCalls: unknown[][] = []
+  const patchApi = createApi({
+    baseQuery: async () => ({ data: { name: 'original' }, meta: 'from base' }),
+    tagTypes: ['Post'],
+    endpoints: (build) => ({
+      getPost: build.query<{ name: string }, number>({
+        query: (id) => `${id}`,
+        providesTags: (...args) => {
+          providesTagsCalls.push(args)
+          return ['Post']
+        },
+      }),
+      getCount: build.query<number, void>({ queryFn: () => ({ data: 1 }) }),
+      getInstance: build.query<Counter, void>({
+        queryFn: () => ({ data: new Counter(1) }),
+      }),
+    }),
+  })
+
+  beforeEach(() => {
+    providesTagsCalls.length = 0
+  })
+
+  test('a recipe that changes nothing dispatches no action', async () => {
+    const { store } = setupApiStore(
+      patchApi,
+      { ...actionsReducer },
+      { withoutTestLifecycles: true },
+    )
+    await store.dispatch(patchApi.endpoints.getPost.initiate(1))
+    const actionCount = store.getState().actions.length
+
+    const patchResult = store.dispatch(
+      patchApi.util.updateQueryData('getPost', 1, (draft) => {
+        draft.name = 'original'
+      }),
+    )
+
+    expect(patchResult.patches).toEqual([])
+    expect(store.getState().actions.length).toBe(actionCount)
+    expect(providesTagsCalls).toHaveLength(1)
+  })
+
+  test('non-draftable data is replaced by the recipe return value', async () => {
+    const { store } = setupApiStore(patchApi, undefined, {
+      withoutTestLifecycles: true,
+    })
+    await store.dispatch(patchApi.endpoints.getCount.initiate())
+    await store.dispatch(patchApi.endpoints.getInstance.initiate())
+
+    const countPatch = store.dispatch(
+      patchApi.util.updateQueryData('getCount', undefined, () => 42),
+    )
+    expect(countPatch.patches).toEqual([{ op: 'replace', path: [], value: 42 }])
+    expect(store.getState().api.queries['getCount(undefined)']?.data).toBe(42)
+    countPatch.undo()
+    expect(store.getState().api.queries['getCount(undefined)']?.data).toBe(1)
+
+    // A recipe that returns nothing writes undefined over a class instance.
+    expect(
+      store.getState().api.queries['getInstance(undefined)']!.data,
+    ).toBeInstanceOf(Counter)
+    store.dispatch(
+      patchApi.util.updateQueryData('getInstance', undefined, (draft) => {
+        void draft.value
+      }),
+    )
+    const instanceEntry = store.getState().api.queries['getInstance(undefined)']
+    expect(instanceEntry).toBeDefined()
+    expect(instanceEntry!.data).toBeUndefined()
+  })
+
+  test('provided tags are recalculated with an empty meta object', async () => {
+    const { store } = setupApiStore(patchApi, undefined, {
+      withoutTestLifecycles: true,
+    })
+    await store.dispatch(patchApi.endpoints.getPost.initiate(7))
+    expect(providesTagsCalls).toEqual([
+      [{ name: 'original' }, undefined, 7, 'from base'],
+    ])
+
+    store.dispatch(
+      patchApi.util.updateQueryData('getPost', 7, (draft) => {
+        draft.name = 'patched'
+      }),
+    )
+
+    expect(providesTagsCalls[1]).toEqual([
+      { name: 'patched' },
+      undefined,
+      7,
+      {},
+    ])
   })
 })

@@ -1,5 +1,5 @@
 import React from 'react'
-import ReactDOM from 'react-dom'
+import ReactDOM from 'react-dom/client'
 import App from './App'
 import { api } from './app/services/posts'
 import { ChakraProvider } from '@chakra-ui/react'
@@ -10,7 +10,7 @@ import { ApiProvider } from '@reduxjs/toolkit/query/react'
 
 // Initialize the msw worker, wait for the service worker registration to resolve, then mount
 worker.start({ quiet: true }).then(() =>
-  ReactDOM.render(
+  ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>
       <ApiProvider api={api}>
         <ChakraProvider>
@@ -20,6 +20,5 @@ worker.start({ quiet: true }).then(() =>
         </ChakraProvider>
       </ApiProvider>
     </React.StrictMode>,
-    document.getElementById('root')
-  )
+  ),
 )

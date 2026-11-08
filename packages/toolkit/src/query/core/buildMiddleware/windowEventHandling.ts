@@ -1,60 +1,72 @@
-import { QueryStatus } from '../apiState'
+import { QueryStatus, STATUS_UNINITIALIZED } from '../apiState'
+import type { QueryCacheKey } from '../apiState'
 import { onFocus, onOnline } from '../setupListeners'
-import type { SubMiddlewareApi, SubMiddlewareBuilder } from './types'
+import type {
+  ApiMiddlewareInternalHandler,
+  InternalHandlerBuilder,
+  SubMiddlewareApi,
+} from './types'
 
-export const build: SubMiddlewareBuilder = ({
+export const buildWindowEventHandler: InternalHandlerBuilder = ({
   reducerPath,
   context,
+  api,
   refetchQuery,
+  runtime,
 }) => {
-  return (mwApi) =>
-    (next) =>
-    (action): any => {
-      const result = next(action)
+  const { removeQueryResult } = api.internalActions
 
-      if (onFocus.match(action)) {
-        refetchValidQueries(mwApi, 'refetchOnFocus')
-      }
-      if (onOnline.match(action)) {
-        refetchValidQueries(mwApi, 'refetchOnReconnect')
-      }
-
-      return result
+  const handler: ApiMiddlewareInternalHandler = (action, mwApi) => {
+    if (onFocus.match(action)) {
+      refetchValidQueries(mwApi, 'refetchOnFocus')
     }
+    if (onOnline.match(action)) {
+      refetchValidQueries(mwApi, 'refetchOnReconnect')
+    }
+  }
 
   function refetchValidQueries(
     api: SubMiddlewareApi,
-    type: 'refetchOnFocus' | 'refetchOnReconnect'
+    type: 'refetchOnFocus' | 'refetchOnReconnect',
   ) {
     const state = api.getState()[reducerPath]
     const queries = state.queries
-    const subscriptions = state.subscriptions
-
     context.batch(() => {
-      for (const queryCacheKey of Object.keys(subscriptions)) {
+      for (const [queryCacheKey, record] of runtime.queries) {
         const querySubState = queries[queryCacheKey]
-        const subscriptionSubState = subscriptions[queryCacheKey]
+        const subscriptionSubState = record.subscribers
 
-        if (
-          !subscriptionSubState ||
-          !querySubState ||
-          querySubState.status === QueryStatus.uninitialized
-        )
-          return
+        if (!subscriptionSubState || !querySubState) continue
 
+        const values = [...subscriptionSubState.values()]
         const shouldRefetch =
-          Object.values(subscriptionSubState).some(
-            (sub) => sub[type] === true
-          ) ||
-          (Object.values(subscriptionSubState).every(
-            (sub) => sub[type] === undefined
-          ) &&
-            state.config[type])
+          values.some((sub) => sub[type] === true) ||
+          (values.every((sub) => sub[type] === undefined) && state.config[type])
 
         if (shouldRefetch) {
-          api.dispatch(refetchQuery(querySubState, queryCacheKey))
+          if (subscriptionSubState.size === 0) {
+            // Like tag invalidation, a running request is decided once it settles
+            if (record.request) {
+              runtime.invalidatedRequestIds.add(record.request.requestId)
+              continue
+            }
+            api.dispatch(
+              removeQueryResult({
+                queryCacheKey: queryCacheKey as QueryCacheKey,
+              }),
+            )
+          } else if (querySubState.status !== STATUS_UNINITIALIZED) {
+            api.dispatch(
+              refetchQuery(
+                querySubState,
+                type === 'refetchOnFocus' ? 'focus' : 'reconnect',
+              ),
+            )
+          }
         }
       }
     })
   }
+
+  return handler
 }

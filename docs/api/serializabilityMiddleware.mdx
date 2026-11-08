@@ -39,16 +39,17 @@ interface SerializableStateInvariantMiddlewareOptions {
   ignoredActions?: string[]
 
   /**
-   * An array of dot-separated path strings to ignore when checking
-   * for serializability, Defaults to ['meta.arg']
+   * An array of dot-separated path strings or regular expressions to ignore
+   * when checking for serializability, Defaults to
+   * ['meta.arg', 'meta.baseQueryMeta', 'payload.options.pollingInterval']
    */
-  ignoredActionPaths?: string[]
+  ignoredActionPaths?: (string | RegExp)[]
 
   /**
-   * An array of dot-separated path strings to ignore when checking
-   * for serializability, Defaults to []
+   * An array of dot-separated path strings or regular expressions to ignore
+   * when checking for serializability, Defaults to []
    */
-  ignoredPaths?: string[]
+  ignoredPaths?: (string | RegExp)[]
   /**
    * Execution time warning threshold. If the middleware takes longer
    * than `warnAfter` ms, a warning will be displayed in the console.
@@ -57,9 +58,14 @@ interface SerializableStateInvariantMiddlewareOptions {
   warnAfter?: number
 
   /**
-   * Opt out of checking state, but continue checking actions
+   * Opt out of checking state. When set to `true`, other state-related params will be ignored.
    */
   ignoreState?: boolean
+
+  /**
+   * Opt out of checking actions. When set to `true`, other action-related params will be ignored.
+   */
+  ignoreActions?: boolean
 }
 ```
 
@@ -87,6 +93,7 @@ import {
   configureStore,
   createSerializableStateInvariantMiddleware,
   isPlain,
+  Tuple,
 } from '@reduxjs/toolkit'
 import reducer from './reducer'
 
@@ -104,7 +111,7 @@ const serializableMiddleware = createSerializableStateInvariantMiddleware({
 
 const store = configureStore({
   reducer,
-  middleware: [serializableMiddleware],
+  middleware: () => new Tuple(serializableMiddleware),
 })
 ```
 

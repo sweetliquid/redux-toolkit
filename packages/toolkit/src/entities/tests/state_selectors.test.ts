@@ -1,19 +1,23 @@
-import type { EntityAdapter, EntityState } from '../index'
-import { createEntityAdapter } from '../index'
-import type { EntitySelectors } from '../models'
+import type {
+  EntityAdapter,
+  EntitySelectors,
+  EntityState,
+} from '@reduxjs/toolkit'
+import {
+  createDraftSafeSelectorCreator,
+  createEntityAdapter,
+} from '@reduxjs/toolkit'
 import type { BookModel } from './fixtures/book'
 import { AClockworkOrange, AnimalFarm, TheGreatGatsby } from './fixtures/book'
-import type { Selector } from 'reselect'
-import { createSelector } from 'reselect'
 
 describe('Entity State Selectors', () => {
   describe('Composed Selectors', () => {
     interface State {
-      books: EntityState<BookModel>
+      books: EntityState<BookModel, string>
     }
 
-    let adapter: EntityAdapter<BookModel>
-    let selectors: EntitySelectors<BookModel, State>
+    let adapter: EntityAdapter<BookModel, string>
+    let selectors: EntitySelectors<BookModel, State, string>
     let state: State
 
     beforeEach(() => {
@@ -62,13 +66,26 @@ describe('Entity State Selectors', () => {
       const second = selectors.selectById(state, AnimalFarm.id)
       expect(second).toBe(AnimalFarm)
     })
+
+    it('should create a selector for selecting many items by ID in the given order', () => {
+      const ids = [TheGreatGatsby.id, 'missing', AClockworkOrange.id]
+      const books = selectors.selectByIds(state, ids)
+
+      expect(books).toEqual([TheGreatGatsby, AClockworkOrange])
+      expect(selectors.selectByIds(state, ids)).toBe(books)
+      expect(selectors.selectByIds(state, [...ids])).toEqual(books)
+    })
   })
 
   describe('Uncomposed Selectors', () => {
-    type State = EntityState<BookModel>
+    type State = EntityState<BookModel, string>
 
-    let adapter: EntityAdapter<BookModel>
-    let selectors: EntitySelectors<BookModel, EntityState<BookModel>>
+    let adapter: EntityAdapter<BookModel, string>
+    let selectors: EntitySelectors<
+      BookModel,
+      EntityState<BookModel, string>,
+      string
+    >
     let state: State
 
     beforeEach(() => {
@@ -97,12 +114,6 @@ describe('Entity State Selectors', () => {
       expect(entities).toEqual(state.entities)
     })
 
-    it('should type single entity from Dictionary as entity type or undefined', () => {
-      expectType<Selector<EntityState<BookModel>, BookModel | undefined>>(
-        createSelector(selectors.selectEntities, (entities) => entities[0])
-      )
-    })
-
     it('should create a selector for selecting the list of models', () => {
       const models = selectors.selectAll(state)
 
@@ -121,9 +132,39 @@ describe('Entity State Selectors', () => {
       const second = selectors.selectById(state, AnimalFarm.id)
       expect(second).toBe(AnimalFarm)
     })
+
+    it('should create a selector for selecting many items by ID in the given order', () => {
+      const ids = [AnimalFarm.id, TheGreatGatsby.id]
+      const books = selectors.selectByIds(state, ids)
+
+      expect(books).toEqual([AnimalFarm, TheGreatGatsby])
+      expect(selectors.selectByIds(state, ids)).toBe(books)
+
+      const nextState = adapter.updateOne(state, {
+        id: AClockworkOrange.id,
+        changes: { author: 'Anthony Burgess' },
+      })
+      expect(selectors.selectByIds(nextState, ids)).not.toBe(books)
+      expect(selectors.selectByIds(nextState, ids)).toEqual(books)
+    })
+  })
+  describe('custom createSelector instance', () => {
+    it('should use the custom createSelector function if provided', () => {
+      const memoizeSpy = vi.fn(
+        // test that we're allowed to pass memoizers with different options, as long as they're optional
+        <F extends (...args: any[]) => any>(fn: F, param?: boolean) => fn,
+      )
+      const createCustomSelector = createDraftSafeSelectorCreator(memoizeSpy)
+
+      const adapter = createEntityAdapter({
+        selectId: (book: BookModel) => book.id,
+      })
+
+      adapter.getSelectors(undefined, { createSelector: createCustomSelector })
+
+      expect(memoizeSpy).toHaveBeenCalled()
+
+      memoizeSpy.mockClear()
+    })
   })
 })
-
-function expectType<T>(t: T) {
-  return t
-}

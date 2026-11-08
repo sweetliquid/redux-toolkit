@@ -1,28 +1,19 @@
-import { enableES5 } from 'immer'
-export * from 'redux'
-export {
-  default as createNextState,
-  current,
-  freeze,
-  original,
-  isDraft,
-} from 'immer'
-export type { Draft } from 'immer'
-export { createSelector } from 'reselect'
-export type {
-  Selector,
-  OutputParametricSelector,
-  OutputSelector,
-  ParametricSelector,
-} from 'reselect'
-export { createDraftSafeSelector } from './createDraftSafeSelector'
-export type { ThunkAction, ThunkDispatch } from 'redux-thunk'
+// This must remain here so that the `mangleErrors.cjs` build script
+// does not have to import this into each source file it rewrites.
+import { formatProdErrorMessage } from './formatProdErrorMessage'
 
-// We deliberately enable Immer's ES5 support, on the grounds that
-// we assume RTK will be used with React Native and other Proxy-less
-// environments.  In addition, that's how Immer 4 behaved, and since
-// we want to ship this in an RTK minor, we should keep the same behavior.
-enableES5()
+export * from 'redux'
+export { freeze, original } from 'immer'
+export { createNextState, current, isDraft } from './immerImports'
+export type { Draft, WritableDraft } from './draftTypes'
+export { createSelector, lruMemoize } from 'reselect'
+export { createSelectorCreator, weakMapMemoize } from './reselectImports'
+export type { Selector, OutputSelector } from 'reselect'
+export {
+  createDraftSafeSelector,
+  createDraftSafeSelectorCreator,
+} from './createDraftSafeSelector'
+export type { ThunkAction, ThunkDispatch, ThunkMiddleware } from 'redux-thunk'
 
 export {
   // js
@@ -30,14 +21,15 @@ export {
 } from './configureStore'
 export type {
   // types
-  ConfigureEnhancersCallback,
   ConfigureStoreOptions,
   EnhancedStore,
 } from './configureStore'
+export type { DevToolsEnhancerOptions } from './devtoolsExtension'
 export {
   // js
   createAction,
-  getType,
+  isActionCreator,
+  isFSA as isFluxStandardAction,
 } from './createAction'
 export type {
   // types
@@ -63,6 +55,9 @@ export type {
 export {
   // js
   createSlice,
+  buildCreateSlice,
+  asyncThunkCreator,
+  ReducerType,
 } from './createSlice'
 
 export type {
@@ -73,8 +68,11 @@ export type {
   SliceCaseReducers,
   ValidateSliceCaseReducers,
   CaseReducerWithPrepare,
-  SliceActionCreator,
+  ReducerCreators,
+  SliceSelectors,
 } from './createSlice'
+export type { ActionCreatorInvariantMiddlewareOptions } from './actionCreatorInvariantMiddleware'
+export { createActionCreatorInvariantMiddleware } from './actionCreatorInvariantMiddleware'
 export {
   // js
   createImmutableStateInvariantMiddleware,
@@ -94,25 +92,22 @@ export type {
   // types
   SerializableStateInvariantMiddlewareOptions,
 } from './serializableStateInvariantMiddleware'
-export {
-  // js
-  getDefaultMiddleware,
-} from './getDefaultMiddleware'
 export type {
   // types
   ActionReducerMapBuilder,
+  AsyncThunkReducers,
 } from './mapBuilders'
-export { MiddlewareArray } from './utils'
+export { Tuple } from './utils'
 
 export { createEntityAdapter } from './entities/create_adapter'
 export type {
-  Dictionary,
   EntityState,
   EntityAdapter,
   EntitySelectors,
   EntityStateAdapter,
   EntityId,
   Update,
+  RemoveManyFilter,
   IdSelector,
   Comparer,
 } from './entities/models'
@@ -124,11 +119,17 @@ export {
 } from './createAsyncThunk'
 export type {
   AsyncThunk,
+  AsyncThunkConfig,
+  AsyncThunkDispatchConfig,
   AsyncThunkOptions,
   AsyncThunkAction,
+  AsyncThunkPromise,
   AsyncThunkPayloadCreatorReturnValue,
   AsyncThunkPayloadCreator,
+  GetState,
+  GetThunkAPI,
   SerializedError,
+  CreateAsyncThunkFunction,
 } from './createAsyncThunk'
 
 export {
@@ -149,4 +150,70 @@ export type {
 
 export { nanoid } from './nanoid'
 
-export { default as isPlainObject } from './isPlainObject'
+export type {
+  ListenerEffect,
+  ListenerMiddleware,
+  ListenerMiddlewareDispatch,
+  ListenerEffectAPI,
+  ListenerMiddlewareInstance,
+  CreateListenerMiddlewareOptions,
+  ListenerErrorHandler,
+  TypedStartListening,
+  TypedAddListener,
+  TypedAddListenerAction,
+  TypedStopListening,
+  TypedRemoveListener,
+  TypedRemoveListenerAction,
+  UnsubscribeListener,
+  UnsubscribeListenerOptions,
+  ForkedTaskExecutor,
+  ForkedTask,
+  ForkedTaskAPI,
+  AsyncTaskExecutor,
+  SyncTaskExecutor,
+  TaskCancelled,
+  TaskRejected,
+  TaskResolved,
+  TaskResult,
+} from './listenerMiddleware/index'
+export type { AnyListenerPredicate } from './listenerMiddleware/types'
+
+export {
+  createListenerMiddleware,
+  addListener,
+  removeListener,
+  clearAllListeners,
+  TaskAbortError,
+} from './listenerMiddleware/index'
+
+export type {
+  AddMiddleware,
+  DynamicDispatch,
+  DynamicMiddlewareInstance,
+  GetDispatchType as GetDispatch,
+  MiddlewareApiConfig,
+  WithMiddleware,
+} from './dynamicMiddleware/types'
+export { createDynamicMiddleware } from './dynamicMiddleware/index'
+
+export {
+  SHOULD_AUTOBATCH,
+  prepareAutoBatched,
+  autoBatchEnhancer,
+} from './autoBatchEnhancer'
+export type { AutoBatchOptions } from './autoBatchEnhancer'
+
+export { combineSlices } from './combineSlices'
+
+export type {
+  CombinedSliceReducer,
+  WithSlice,
+  WithSlicePreloadedState,
+} from './combineSlices'
+
+export type {
+  ExtractDispatchExtensions as TSHelpersExtractDispatchExtensions,
+  SafePromise,
+} from './tsHelpers'
+
+export { formatProdErrorMessage } from './formatProdErrorMessage'

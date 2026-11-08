@@ -1,16 +1,15 @@
-import type { PayloadAction } from '@reduxjs/toolkit'
-import {
-  createAsyncThunk,
-  createAction,
-  createSlice,
-  configureStore,
-  createEntityAdapter,
-} from '@reduxjs/toolkit'
-import type { EntityAdapter } from '@internal/entities/models'
 import type { BookModel } from '@internal/entities/tests/fixtures/book'
+import type { EntityAdapter, PayloadAction } from '@reduxjs/toolkit'
+import {
+  configureStore,
+  createAction,
+  createAsyncThunk,
+  createEntityAdapter,
+  createSlice,
+} from '@reduxjs/toolkit'
 
 describe('Combined entity slice', () => {
-  let adapter: EntityAdapter<BookModel>
+  let adapter: EntityAdapter<BookModel, string>
 
   beforeEach(() => {
     adapter = createEntityAdapter({
@@ -48,7 +47,7 @@ describe('Combined entity slice', () => {
       async (arg, { getState, dispatch, extra, requestId, signal }) => {
         const state = getState()
         return fakeBooks
-      }
+      },
     )
 
     const booksSlice = createSlice({
@@ -60,7 +59,7 @@ describe('Combined entity slice', () => {
           const sizeBefore = state.ids.length
           // Originally, having nested `produce` calls don't mutate `state` here as I would have expected.
           // (note that `state` here is actually an Immer Draft<S>, from `createReducer`)
-          // One woarkound was to return the new plain result value instead
+          // One workaround was to return the new plain result value instead
           // See https://github.com/immerjs/immer/issues/533
           // However, after tweaking `createStateOperator` to check if the argument is a draft,
           // we can just treat the operator as strictly mutating, without returning a result,

@@ -1,65 +1,114 @@
 import type {
-  AnyAction,
-  AsyncThunk,
+  Action,
   AsyncThunkAction,
+  Dispatch,
   Middleware,
   MiddlewareAPI,
+  ThunkAction,
   ThunkDispatch,
+  UnknownAction,
 } from '@reduxjs/toolkit'
-
 import type { Api, ApiContext } from '../../apiTypes'
+import type { QueryStartReason } from '../../baseQueryTypes'
 import type {
   AssertTagTypes,
   EndpointDefinitions,
 } from '../../endpointDefinitions'
-import type { QueryStatus, QuerySubState, RootState } from '../apiState'
 import type {
+  QueryStatus,
+  QuerySubState,
+  ApiRootState,
+  SubscriptionInternalState,
+} from '../apiState'
+import type { StoreRuntime } from './runtime'
+import type {
+  InfiniteQueryThunk,
   MutationThunk,
   QueryThunk,
   QueryThunkArg,
   ThunkResult,
 } from '../buildThunks'
+import type {
+  InfiniteQueryActionCreatorResult,
+  MutationActionCreatorResult,
+  QueryActionCreatorResult,
+} from '../buildInitiate'
+import type { AllSelectors } from '../buildSelectors'
 
 export type QueryStateMeta<T> = Record<string, undefined | T>
 export type TimeoutId = ReturnType<typeof setTimeout>
 
+export interface SubscriptionSelectors {
+  getSubscriptions: () => SubscriptionInternalState
+  getSubscriptionCount: (queryCacheKey: string) => number
+  isRequestSubscribed: (queryCacheKey: string, requestId: string) => boolean
+}
+
 export interface BuildMiddlewareInput<
   Definitions extends EndpointDefinitions,
   ReducerPath extends string,
-  TagTypes extends string
+  TagTypes extends string,
 > {
   reducerPath: ReducerPath
   context: ApiContext<Definitions>
   queryThunk: QueryThunk
   mutationThunk: MutationThunk
+  infiniteQueryThunk: InfiniteQueryThunk<any>
   api: Api<any, Definitions, ReducerPath, TagTypes>
   assertTagType: AssertTagTypes
+  selectors: AllSelectors
+  getRunningQueryThunk: (
+    endpointName: string,
+    queryArgs: any,
+  ) => (dispatch: Dispatch) => QueryActionCreatorResult<any> | undefined
+  createRuntime: (dispatch: Dispatch, getState: () => unknown) => StoreRuntime
 }
 
 export type SubMiddlewareApi = MiddlewareAPI<
-  ThunkDispatch<any, any, AnyAction>,
-  RootState<EndpointDefinitions, string, string>
+  ThunkDispatch<any, any, UnknownAction>,
+  ApiRootState<EndpointDefinitions, string, string>
 >
 
-export interface BuildSubMiddlewareInput
-  extends BuildMiddlewareInput<EndpointDefinitions, string, string> {
+export interface BuildSubMiddlewareInput extends BuildMiddlewareInput<
+  EndpointDefinitions,
+  string,
+  string
+> {
+  runtime: StoreRuntime
   refetchQuery(
     querySubState: Exclude<
       QuerySubState<any>,
       { status: QueryStatus.uninitialized }
     >,
-    queryCacheKey: string,
-    override?: Partial<QueryThunkArg>
-  ): AsyncThunkAction<ThunkResult, QueryThunkArg, {}>
+    startReason: QueryStartReason,
+  ): ThunkAction<QueryActionCreatorResult<any>, any, any, UnknownAction>
+  isThisApiSliceAction: (action: Action) => boolean
+  selectors: AllSelectors
+  mwApi: MiddlewareAPI<
+    ThunkDispatch<any, any, UnknownAction>,
+    ApiRootState<EndpointDefinitions, string, string>
+  >
 }
 
 export type SubMiddlewareBuilder = (
-  input: BuildSubMiddlewareInput
+  input: BuildSubMiddlewareInput,
 ) => Middleware<
   {},
-  RootState<EndpointDefinitions, string, string>,
-  ThunkDispatch<any, any, AnyAction>
+  ApiRootState<EndpointDefinitions, string, string>,
+  ThunkDispatch<any, any, UnknownAction>
 >
+
+type MwNext = Parameters<ReturnType<Middleware>>[0]
+
+export type ApiMiddlewareInternalHandler<Return = void> = (
+  action: Action,
+  mwApi: SubMiddlewareApi & { next: MwNext },
+  prevState: ApiRootState<EndpointDefinitions, string, string>,
+) => Return
+
+export type InternalHandlerBuilder<ReturnType = void> = (
+  input: BuildSubMiddlewareInput,
+) => ApiMiddlewareInternalHandler<ReturnType>
 
 export interface PromiseConstructorWithKnownReason {
   /**
@@ -71,13 +120,15 @@ export interface PromiseConstructorWithKnownReason {
   new <T, R>(
     executor: (
       resolve: (value: T | PromiseLike<T>) => void,
-      reject: (reason?: R) => void
-    ) => void
+      reject: (reason?: R) => void,
+    ) => void,
   ): PromiseWithKnownReason<T, R>
 }
 
-export interface PromiseWithKnownReason<T, R>
-  extends Omit<Promise<T>, 'then' | 'catch'> {
+export type PromiseWithKnownReason<T, R> = Omit<
+  Promise<T>,
+  'then' | 'catch'
+> & {
   /**
    * Attaches callbacks for the resolution and/or rejection of the Promise.
    * @param onfulfilled The callback to execute when the Promise is resolved.
@@ -92,7 +143,7 @@ export interface PromiseWithKnownReason<T, R>
     onrejected?:
       | ((reason: R) => TResult2 | PromiseLike<TResult2>)
       | undefined
-      | null
+      | null,
   ): Promise<TResult1 | TResult2>
 
   /**
@@ -104,6 +155,6 @@ export interface PromiseWithKnownReason<T, R>
     onrejected?:
       | ((reason: R) => TResult | PromiseLike<TResult>)
       | undefined
-      | null
+      | null,
   ): Promise<T | TResult>
 }

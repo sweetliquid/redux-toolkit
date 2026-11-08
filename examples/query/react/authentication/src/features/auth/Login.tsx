@@ -1,22 +1,22 @@
-import * as React from 'react'
 import {
+  Box,
+  Button,
+  Center,
+  Divider,
   Input,
   InputGroup,
   InputRightElement,
-  VStack,
-  Button,
-  Divider,
-  Center,
-  Box,
   useToast,
+  VStack,
 } from '@chakra-ui/react'
-import { useHistory } from 'react-router-dom'
+import * as React from 'react'
 import { useDispatch } from 'react-redux'
+import { useNavigate } from 'react-router-dom'
 import { setCredentials } from './authSlice'
 
-import { ProtectedComponent } from './ProtectedComponent'
-import { useLoginMutation } from '../../app/services/auth'
 import type { LoginRequest } from '../../app/services/auth'
+import { useLoginMutation } from '../../app/services/auth'
+import { ProtectedComponent } from './ProtectedComponent'
 
 function PasswordInput({
   name,
@@ -48,7 +48,7 @@ function PasswordInput({
 
 export const Login = () => {
   const dispatch = useDispatch()
-  const { push } = useHistory()
+  const navigate = useNavigate()
   const toast = useToast()
 
   const [formState, setFormState] = React.useState<LoginRequest>({
@@ -80,12 +80,12 @@ export const Login = () => {
           <PasswordInput onChange={handleChange} name="password" />
         </InputGroup>
         <Button
-          isFullWidth
+          width="100%"
           onClick={async () => {
             try {
               const user = await login(formState).unwrap()
               dispatch(setCredentials(user))
-              push('/')
+              navigate('/')
             } catch (err) {
               toast({
                 status: 'error',

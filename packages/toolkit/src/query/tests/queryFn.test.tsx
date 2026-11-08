@@ -1,15 +1,23 @@
+import { noop } from '@internal/listenerMiddleware/utils'
+import type { Post } from '@internal/query/tests/mocks/handlers'
+import { posts } from '@internal/query/tests/mocks/handlers'
+import { actionsReducer, setupApiStore } from '@internal/tests/utils/helpers'
+import type { SerializedError } from '@reduxjs/toolkit'
 import { configureStore } from '@reduxjs/toolkit'
-import type { BaseQueryFn, FetchBaseQueryError } from '@reduxjs/toolkit/query'
+import type {
+  BaseQueryFn,
+  FetchBaseQueryError,
+  QuerySubState,
+} from '@reduxjs/toolkit/query'
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query'
-import type { Post } from './mocks/server'
-import { posts } from './mocks/server'
-import { actionsReducer, setupApiStore } from './helpers'
 
 describe('queryFn base implementation tests', () => {
   const baseQuery: BaseQueryFn<string, { wrappedByBaseQuery: string }, string> =
-    jest.fn((arg: string) => ({
-      data: { wrappedByBaseQuery: arg },
-    }))
+    vi.fn((arg: string) =>
+      arg.includes('withErrorQuery')
+        ? { error: `cut${arg}` }
+        : { data: { wrappedByBaseQuery: arg } },
+    )
 
   const api = createApi({
     baseQuery,
@@ -20,6 +28,14 @@ describe('queryFn base implementation tests', () => {
         },
         transformResponse(response) {
           return response.wrappedByBaseQuery
+        },
+      }),
+      withErrorQuery: build.query<string, string>({
+        query(arg: string) {
+          return `resultFrom(${arg})`
+        },
+        transformErrorResponse(response) {
+          return response.slice(3)
         },
       }),
       withQueryFn: build.query<string, string>({
@@ -139,6 +155,7 @@ describe('queryFn base implementation tests', () => {
 
   const {
     withQuery,
+    withErrorQuery,
     withQueryFn,
     withErrorQueryFn,
     withThrowingQueryFn,
@@ -164,26 +181,42 @@ describe('queryFn base implementation tests', () => {
 
   test.each([
     ['withQuery', withQuery, 'data'],
+    ['withErrorQuery', withErrorQuery, 'error'],
     ['withQueryFn', withQueryFn, 'data'],
     ['withErrorQueryFn', withErrorQueryFn, 'error'],
     ['withThrowingQueryFn', withThrowingQueryFn, 'throw'],
     ['withAsyncQueryFn', withAsyncQueryFn, 'data'],
     ['withAsyncErrorQueryFn', withAsyncErrorQueryFn, 'error'],
     ['withAsyncThrowingQueryFn', withAsyncThrowingQueryFn, 'throw'],
-  ])('%s1', async (endpointName, endpoint, expectedResult) => {
+  ])('%s', async (endpointName, endpoint, expectedResult) => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(noop)
+
     const thunk = endpoint.initiate(endpointName)
-    const result = await store.dispatch(thunk)
+
+    const result: undefined | QuerySubState<any> = await store.dispatch(thunk)
+
+    if (endpointName.includes('Throw')) {
+      expect(consoleErrorSpy).toHaveBeenCalledOnce()
+
+      expect(consoleErrorSpy).toHaveBeenLastCalledWith(
+        `An unhandled error occurred processing a request for the endpoint "${endpointName}".\nIn the case of an unhandled error, no tags will be "provided" or "invalidated".`,
+        Error(`resultFrom(${endpointName})`),
+      )
+    } else {
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+    }
+
     if (expectedResult === 'data') {
       expect(result).toEqual(
         expect.objectContaining({
           data: `resultFrom(${endpointName})`,
-        })
+        }),
       )
     } else if (expectedResult === 'error') {
       expect(result).toEqual(
         expect.objectContaining({
           error: `resultFrom(${endpointName})`,
-        })
+        }),
       )
     } else {
       expect(result).toEqual(
@@ -191,9 +224,11 @@ describe('queryFn base implementation tests', () => {
           error: expect.objectContaining({
             message: `resultFrom(${endpointName})`,
           }),
-        })
+        }),
       )
     }
+
+    consoleErrorSpy.mockRestore()
   })
 
   test.each([
@@ -208,19 +243,37 @@ describe('queryFn base implementation tests', () => {
       'throw',
     ],
   ])('%s', async (endpointName, endpoint, expectedResult) => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(noop)
+
     const thunk = endpoint.initiate(endpointName)
-    const result = await store.dispatch(thunk)
+
+    const result:
+      | undefined
+      | { data: string }
+      | { error: string | SerializedError } = await store.dispatch(thunk)
+
+    if (endpointName.includes('Throw')) {
+      expect(consoleErrorSpy).toHaveBeenCalledOnce()
+
+      expect(consoleErrorSpy).toHaveBeenLastCalledWith(
+        `An unhandled error occurred processing a request for the endpoint "${endpointName}".\nIn the case of an unhandled error, no tags will be "provided" or "invalidated".`,
+        Error(`resultFrom(${endpointName})`),
+      )
+    } else {
+      expect(consoleErrorSpy).not.toHaveBeenCalled()
+    }
+
     if (expectedResult === 'data') {
       expect(result).toEqual(
         expect.objectContaining({
           data: `resultFrom(${endpointName})`,
-        })
+        }),
       )
     } else if (expectedResult === 'error') {
       expect(result).toEqual(
         expect.objectContaining({
           error: `resultFrom(${endpointName})`,
-        })
+        }),
       )
     } else {
       expect(result).toEqual(
@@ -228,30 +281,63 @@ describe('queryFn base implementation tests', () => {
           error: expect.objectContaining({
             message: `resultFrom(${endpointName})`,
           }),
-        })
+        }),
       )
     }
+
+    consoleErrorSpy.mockRestore()
   })
 
   test('neither provided', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(noop)
+
     {
       const thunk = withNeither.initiate('withNeither')
-      const result = await store.dispatch(thunk)
+
+      const result: QuerySubState<any> = await store.dispatch(thunk)
+
+      expect(consoleErrorSpy).toHaveBeenCalledOnce()
+
+      expect(consoleErrorSpy).toHaveBeenLastCalledWith(
+        `An unhandled error occurred processing a request for the endpoint "withNeither".\nIn the case of an unhandled error, no tags will be "provided" or "invalidated".`,
+        TypeError('endpointDefinition.queryFn is not a function'),
+      )
+
       expect(result.error).toEqual(
         expect.objectContaining({
           message: 'endpointDefinition.queryFn is not a function',
-        })
+        }),
       )
+
+      consoleErrorSpy.mockClear()
     }
     {
       const thunk = mutationWithNeither.initiate('mutationWithNeither')
-      const result = await store.dispatch(thunk)
-      expect('error' in result && result.error).toEqual(
+
+      const result:
+        | undefined
+        | { data: string }
+        | { error: string | SerializedError } = await store.dispatch(thunk)
+
+      expect(consoleErrorSpy).toHaveBeenCalledOnce()
+
+      expect(consoleErrorSpy).toHaveBeenLastCalledWith(
+        `An unhandled error occurred processing a request for the endpoint "mutationWithNeither".\nIn the case of an unhandled error, no tags will be "provided" or "invalidated".`,
+        TypeError('endpointDefinition.queryFn is not a function'),
+      )
+
+      if (!('error' in result)) {
+        expect.fail()
+      }
+
+      expect(result.error).toEqual(
         expect.objectContaining({
           message: 'endpointDefinition.queryFn is not a function',
-        })
+        }),
       )
     }
+
+    consoleErrorSpy.mockRestore()
   })
 })
 
@@ -261,16 +347,16 @@ describe('usage scenario tests', () => {
     exists: () => true,
     data: () => mockData,
   }
-  const get = jest.fn(() => Promise.resolve(mockDocResult))
-  const doc = jest.fn((name) => ({
+  const get = vi.fn(() => Promise.resolve(mockDocResult))
+  const doc = vi.fn((name) => ({
     get,
   }))
-  const collection = jest.fn((name) => ({ get, doc }))
+  const collection = vi.fn((name) => ({ get, doc }))
   const firestore = () => {
     return { collection, doc }
   }
 
-  const baseQuery = fetchBaseQuery({ baseUrl: 'http://example.com/' })
+  const baseQuery = fetchBaseQuery({ baseUrl: 'https://example.com/' })
   const api = createApi({
     baseQuery,
     endpoints: (build) => ({
@@ -323,28 +409,40 @@ describe('usage scenario tests', () => {
 
   it('can chain multiple queries together', async () => {
     const result = await storeRef.store.dispatch(
-      api.endpoints.getRandomUser.initiate()
+      api.endpoints.getRandomUser.initiate(),
     )
     expect(result.data).toEqual(posts[1])
   })
 
   it('can wrap a service like Firebase', async () => {
     const result = await storeRef.store.dispatch(
-      api.endpoints.getFirebaseUser.initiate(1)
+      api.endpoints.getFirebaseUser.initiate(1),
     )
     expect(result.data).toEqual(mockData)
   })
 
   it('can wrap a service like Firebase and handle errors', async () => {
-    const result = await storeRef.store.dispatch(
-      api.endpoints.getMissingFirebaseUser.initiate(1)
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(noop)
+
+    const result: QuerySubState<any> = await storeRef.store.dispatch(
+      api.endpoints.getMissingFirebaseUser.initiate(1),
     )
+
+    expect(consoleErrorSpy).toHaveBeenCalledOnce()
+
+    expect(consoleErrorSpy).toHaveBeenLastCalledWith(
+      `An unhandled error occurred processing a request for the endpoint "getMissingFirebaseUser".\nIn the case of an unhandled error, no tags will be "provided" or "invalidated".`,
+      Error('Missing user'),
+    )
+
     expect(result.data).toBeUndefined()
     expect(result.error).toEqual(
       expect.objectContaining({
         message: 'Missing user',
         name: 'Error',
-      })
+      }),
     )
+
+    consoleErrorSpy.mockRestore()
   })
 })

@@ -1,5 +1,9 @@
+import type { Middleware, UnknownAction } from '@reduxjs/toolkit'
+import { configureStore, isAction } from '@reduxjs/toolkit'
 import { createApi } from '@reduxjs/toolkit/query'
-import { actionsReducer, setupApiStore, waitMs } from './helpers'
+import { delay } from 'msw'
+import { actionsReducer, setupApiStore } from '../../tests/utils/helpers'
+import { vi } from 'vitest'
 
 const baseQuery = (args?: any) => ({ data: args })
 const api = createApi({
@@ -24,9 +28,17 @@ const api = createApi({
       },
       providesTags: ['Bread'],
     }),
+    invalidateFruit: build.mutation({
+      query: (fruit?: 'Banana' | 'Bread' | null) => ({
+        url: `invalidate/fruit/${fruit || ''}`,
+      }),
+      invalidatesTags(result, error, arg) {
+        return [arg]
+      },
+    }),
   }),
 })
-const { getBanana, getBread } = api.endpoints
+const { getBanana, getBread, invalidateFruit } = api.endpoints
 
 const storeRef = setupApiStore(api, {
   ...actionsReducer,
@@ -37,13 +49,13 @@ it('invalidates the specified tags', async () => {
   expect(storeRef.store.getState().actions).toMatchSequence(
     api.internalActions.middlewareRegistered.match,
     getBanana.matchPending,
-    getBanana.matchFulfilled
+    getBanana.matchFulfilled,
   )
 
   await storeRef.store.dispatch(api.util.invalidateTags(['Banana', 'Bread']))
 
   // Slight pause to let the middleware run and such
-  await waitMs(20)
+  await delay(20)
 
   const firstSequence = [
     api.internalActions.middlewareRegistered.match,
@@ -58,7 +70,7 @@ it('invalidates the specified tags', async () => {
   await storeRef.store.dispatch(getBread.initiate(1))
   await storeRef.store.dispatch(api.util.invalidateTags([{ type: 'Bread' }]))
 
-  await waitMs(20)
+  await delay(20)
 
   expect(storeRef.store.getState().actions).toMatchSequence(
     ...firstSequence,
@@ -66,53 +78,382 @@ it('invalidates the specified tags', async () => {
     getBread.matchFulfilled,
     api.util.invalidateTags.match,
     getBread.matchPending,
-    getBread.matchFulfilled
+    getBread.matchFulfilled,
   )
 })
 
-describe.skip('TS only tests', () => {
-  it('should allow for an array of string TagTypes', () => {
-    api.util.invalidateTags(['Banana', 'Bread'])
-  })
-  it('should allow for an array of full TagTypes descriptions', () => {
-    api.util.invalidateTags([{ type: 'Banana' }, { type: 'Bread', id: 1 }])
+it('invalidates tags correctly when null or undefined are provided as tags', async () => {
+  await storeRef.store.dispatch(getBanana.initiate(1))
+  await storeRef.store.dispatch(
+    api.util.invalidateTags([undefined, null, 'Banana']),
+  )
+
+  // Slight pause to let the middleware run and such
+  await delay(20)
+
+  const apiActions = [
+    api.internalActions.middlewareRegistered.match,
+    getBanana.matchPending,
+    getBanana.matchFulfilled,
+    api.util.invalidateTags.match,
+    getBanana.matchPending,
+    getBanana.matchFulfilled,
+  ]
+
+  expect(storeRef.store.getState().actions).toMatchSequence(...apiActions)
+})
+
+it.each([
+  {
+    tags: [undefined, null, 'Bread'] as Parameters<
+      typeof api.util.invalidateTags
+    >['0'],
+  },
+  { tags: [undefined, null] },
+  { tags: [] },
+])(
+  'does not invalidate with tags=$tags if no query matches',
+  async ({ tags }) => {
+    await storeRef.store.dispatch(getBanana.initiate(1))
+    await storeRef.store.dispatch(api.util.invalidateTags(tags))
+
+    // Slight pause to let the middleware run and such
+    await delay(20)
+
+    const apiActions = [
+      api.internalActions.middlewareRegistered.match,
+      getBanana.matchPending,
+      getBanana.matchFulfilled,
+      api.util.invalidateTags.match,
+    ]
+
+    expect(storeRef.store.getState().actions).toMatchSequence(...apiActions)
+  },
+)
+
+it.each([
+  { mutationArg: 'Bread' as 'Bread' | null | undefined },
+  { mutationArg: undefined },
+  { mutationArg: null },
+])(
+  'does not invalidate queries when a mutation with tags=[$mutationArg] runs and does not match anything',
+  async ({ mutationArg }) => {
+    await storeRef.store.dispatch(getBanana.initiate(1))
+    await storeRef.store.dispatch(invalidateFruit.initiate(mutationArg))
+
+    // Slight pause to let the middleware run and such
+    await delay(20)
+
+    const apiActions = [
+      api.internalActions.middlewareRegistered.match,
+      getBanana.matchPending,
+      getBanana.matchFulfilled,
+      invalidateFruit.matchPending,
+      invalidateFruit.matchFulfilled,
+    ]
+
+    expect(storeRef.store.getState().actions).toMatchSequence(...apiActions)
+  },
+)
+
+it('syncs subscription state to the store with subscriptionsUpdated', async () => {
+  // Create a fresh store for this test to avoid interference
+  const testStoreRef = setupApiStore(
+    api,
+    {
+      ...actionsReducer,
+    },
+    { withoutListeners: true },
+  )
+
+  // Start multiple subscriptions
+  const subscription1 = testStoreRef.store.dispatch(
+    getBanana.initiate(1, {
+      subscriptionOptions: { pollingInterval: 1000 },
+    }),
+  )
+  const subscription2 = testStoreRef.store.dispatch(
+    getBanana.initiate(2, {
+      subscriptionOptions: { refetchOnFocus: true },
+    }),
+  )
+  const subscription3 = testStoreRef.store.dispatch(
+    api.endpoints.getBananas.initiate(),
+  )
+
+  // Wait for the subscriptions to be established
+  await Promise.all([subscription1, subscription2, subscription3])
+
+  // Wait for the subscription sync timer (500ms + buffer)
+  await delay(600)
+
+  // Check the final subscription state in the store
+  const finalState = testStoreRef.store.getState()
+  const subscriptionState = finalState[api.reducerPath].subscriptions
+
+  // Should have subscriptions for getBanana(1), getBanana(2), and getBananas()
+  expect(subscriptionState).toMatchObject({
+    'getBanana(1)': {
+      [subscription1.requestId]: { pollingInterval: 1000 },
+    },
+    'getBanana(2)': {
+      [subscription2.requestId]: { refetchOnFocus: true },
+    },
+    'getBananas(undefined)': {
+      [subscription3.requestId]: {},
+    },
   })
 
-  it('should allow for a mix of full descriptions as well as plain strings', () => {
-    api.util.invalidateTags(['Banana', { type: 'Bread', id: 1 }])
+  // Verify the subscription entries have the expected structure
+  expect(Object.keys(subscriptionState)).toHaveLength(3)
+  expect(subscriptionState['getBanana(1)']?.[subscription1.requestId]).toEqual({
+    pollingInterval: 1000,
   })
-  it('should error when using non-existing TagTypes', () => {
-    // @ts-expect-error
-    api.util.invalidateTags(['Missing Tag'])
+  expect(subscriptionState['getBanana(2)']?.[subscription2.requestId]).toEqual({
+    refetchOnFocus: true,
   })
-  it('should error when using non-existing TagTypes in the full format', () => {
-    // @ts-expect-error
-    api.util.invalidateTags([{ type: 'Missing' }])
+  expect(
+    subscriptionState['getBananas(undefined)']?.[subscription3.requestId],
+  ).toEqual({})
+})
+
+it('records subscription patches directly and only syncs when subscribers change', async () => {
+  vi.useFakeTimers()
+  try {
+    const syncActions: UnknownAction[] = []
+    const recordSyncs: Middleware = () => (next) => (action) => {
+      if (api.internalActions.subscriptionsUpdated.match(action)) {
+        syncActions.push(action)
+      }
+      return next(action)
+    }
+    const store = configureStore({
+      reducer: { [api.reducerPath]: api.reducer },
+      middleware: (gdm) =>
+        gdm({ serializableCheck: false, immutableCheck: false })
+          .concat(api.middleware)
+          .concat(recordSyncs),
+    })
+    const getSubscriptionState = () =>
+      store.getState()[api.reducerPath].subscriptions
+
+    const sub1 = store.dispatch(getBanana.initiate(1))
+    const sub2 = store.dispatch(
+      getBanana.initiate(1, { subscriptionOptions: { pollingInterval: 1000 } }),
+    )
+    const sub3 = store.dispatch(getBanana.initiate(2))
+    await vi.advanceTimersByTimeAsync(600)
+
+    expect(syncActions).toHaveLength(1)
+    expect(syncActions[0].payload).toEqual([
+      {
+        op: 'add',
+        path: ['getBanana(1)'],
+        value: {
+          [sub1.requestId]: {},
+          [sub2.requestId]: { pollingInterval: 1000 },
+        },
+      },
+      { op: 'add', path: ['getBanana(2)'], value: { [sub3.requestId]: {} } },
+    ])
+    expect(getSubscriptionState()).toEqual({
+      'getBanana(1)': {
+        [sub1.requestId]: {},
+        [sub2.requestId]: { pollingInterval: 1000 },
+      },
+      'getBanana(2)': { [sub3.requestId]: {} },
+    })
+
+    // Refetches that do not subscribe, including polls, do not re-arm the sync
+    await store.dispatch(
+      getBanana.initiate(1, { subscribe: false, forceRefetch: true }),
+    )
+    await vi.advanceTimersByTimeAsync(1600)
+    expect(syncActions).toHaveLength(1)
+
+    const stateBeforeUnsubscribe = getSubscriptionState()
+    sub3.unsubscribe()
+    await vi.advanceTimersByTimeAsync(600)
+
+    expect(syncActions).toHaveLength(2)
+    expect(syncActions[1].payload).toEqual([
+      { op: 'add', path: ['getBanana(2)'], value: {} },
+    ])
+    const stateAfterUnsubscribe = getSubscriptionState()
+    expect(stateAfterUnsubscribe).not.toBe(stateBeforeUnsubscribe)
+    expect(stateAfterUnsubscribe['getBanana(1)']).toBe(
+      stateBeforeUnsubscribe['getBanana(1)'],
+    )
+    expect(stateAfterUnsubscribe['getBanana(2)']).toEqual({})
+
+    sub1.unsubscribe()
+    sub2.unsubscribe()
+    store.dispatch(api.util.resetApiState())
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('applies subscription syncs after the api slice is replaced without resetApiState', async () => {
+  vi.useFakeTimers()
+  try {
+    const apiReducer = api.reducer
+    const store = configureStore({
+      reducer: (
+        state: { [api.reducerPath]: ReturnType<typeof apiReducer> } | undefined,
+        action: UnknownAction,
+      ) => ({
+        [api.reducerPath]: apiReducer(
+          action.type === 'logout' ? undefined : state?.[api.reducerPath],
+          action,
+        ),
+      }),
+      middleware: (gdm) =>
+        gdm({ serializableCheck: false, immutableCheck: false }).concat(
+          api.middleware,
+        ),
+    })
+
+    const sub1 = store.dispatch(getBanana.initiate(1))
+    const sub2 = store.dispatch(getBanana.initiate(1))
+    await vi.advanceTimersByTimeAsync(600)
+
+    store.dispatch({ type: 'logout' })
+    expect(store.getState()[api.reducerPath].subscriptions).toEqual({})
+
+    sub1.unsubscribe()
+    await vi.advanceTimersByTimeAsync(600)
+
+    expect(store.getState()[api.reducerPath].subscriptions).toEqual({
+      'getBanana(1)': { [sub2.requestId]: {} },
+    })
+
+    sub2.unsubscribe()
+    store.dispatch(api.util.resetApiState())
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('does not leak subscription state between multiple stores using the same API instance (SSR scenario)', async () => {
+  vi.useFakeTimers()
+  // Simulate SSR: create API once at module level
+  const sharedApi = createApi({
+    baseQuery: (args?: any) => ({ data: args }),
+    tagTypes: ['Test'],
+    endpoints: (build) => ({
+      getTest: build.query<unknown, number>({
+        query(id) {
+          return { url: `test/${id}` }
+        },
+      }),
+    }),
   })
-  it('should allow pre-fetching for an endpoint that takes an arg', () => {
-    api.util.prefetch('getBanana', 5, { force: true })
-    api.util.prefetch('getBanana', 5, { force: false })
-    api.util.prefetch('getBanana', 5, { ifOlderThan: false })
-    api.util.prefetch('getBanana', 5, { ifOlderThan: 30 })
-    api.util.prefetch('getBanana', 5, {})
+
+  // Create first store (simulating first SSR request)
+  const store1Ref = setupApiStore(sharedApi, {}, { withoutListeners: true })
+
+  // Add subscription in store1
+  const sub1 = store1Ref.store.dispatch(
+    sharedApi.endpoints.getTest.initiate(1, {
+      subscriptionOptions: { pollingInterval: 1000 },
+    }),
+  )
+  vi.advanceTimersByTime(10)
+  await sub1
+
+  // Wait for subscription sync (500ms + buffer)
+  vi.advanceTimersByTime(600)
+
+  // Verify store1 has the subscription
+  const store1SubscriptionSelectors = store1Ref.store.dispatch(
+    sharedApi.internalActions.internal_getRTKQSubscriptions(),
+  ) as any
+  const store1InternalSubs = store1SubscriptionSelectors.getSubscriptions()
+  expect(store1InternalSubs.size).toBe(1)
+
+  // Create second store (simulating second SSR request)
+  const store2Ref = setupApiStore(sharedApi, {}, { withoutListeners: true })
+
+  // Check subscriptions via internal action
+  const store2SubscriptionSelectors = store2Ref.store.dispatch(
+    sharedApi.internalActions.internal_getRTKQSubscriptions(),
+  ) as any
+
+  const store2InternalSubs = store2SubscriptionSelectors.getSubscriptions()
+
+  expect(store2InternalSubs.size).toBe(0)
+})
+
+it(
+  'initializes a large RTK Query middleware chain without overflowing the stack',
+  { timeout: 120_000 },
+  async () => {
+    const middlewareChain = Array.from({ length: 500 }, () => {
+      const middleware = api.middleware
+      return ((mwApi) => middleware(mwApi)) as typeof api.middleware
+    })
+
+    const store = configureStore({
+      reducer: { [api.reducerPath]: api.reducer },
+      middleware: (gdm) =>
+        gdm({
+          serializableCheck: false,
+          immutableCheck: false,
+        }).concat(...middlewareChain),
+    })
+
+    await store.dispatch(getBanana.initiate(1))
+
+    expect(store.getState()[api.reducerPath].config.middlewareRegistered).toBe(
+      true,
+    )
+    expect(store.getState()[api.reducerPath].queries['getBanana(1)']).toEqual(
+      expect.objectContaining({
+        data: { url: 'banana/1' },
+        status: 'fulfilled',
+      }),
+    )
+  },
+)
+
+it('sends the registration action only to middleware after the api middleware', () => {
+  const seenBefore: string[] = []
+  const seenAfter: string[] = []
+  const recordTo =
+    (seen: string[]): Middleware =>
+    () =>
+    (next) =>
+    (action) => {
+      if (isAction(action)) seen.push(action.type)
+      return next(action)
+    }
+
+  const store = configureStore({
+    reducer: { [api.reducerPath]: api.reducer },
+    middleware: (gdm) =>
+      gdm().concat(recordTo(seenBefore), api.middleware, recordTo(seenAfter)),
   })
-  it('should error when pre-fetching with the incorrect arg type', () => {
-    // @ts-expect-error arg should be number, not string
-    api.util.prefetch('getBanana', '5', { force: true })
-  })
-  it('should allow pre-fetching for an endpoint with a void arg', () => {
-    api.util.prefetch('getBananas', undefined, { force: true })
-    api.util.prefetch('getBananas', undefined, { force: false })
-    api.util.prefetch('getBananas', undefined, { ifOlderThan: false })
-    api.util.prefetch('getBananas', undefined, { ifOlderThan: 30 })
-    api.util.prefetch('getBananas', undefined, {})
-  })
-  it('should error when pre-fetching with a defined arg when expecting void', () => {
-    // @ts-expect-error arg should be void, not number
-    api.util.prefetch('getBananas', 5, { force: true })
-  })
-  it('should error when pre-fetching for an incorrect endpoint name', () => {
-    // @ts-expect-error endpoint name does not exist
-    api.util.prefetch('getPomegranates', undefined, { force: true })
-  })
+  const registeredType = api.internalActions.middlewareRegistered.type
+
+  store.dispatch({ type: 'first' })
+
+  expect(seenBefore).toEqual(['first'])
+  expect(seenAfter).toEqual([registeredType, 'first'])
+  expect(store.getState()[api.reducerPath].config.middlewareRegistered).toBe(
+    true,
+  )
+
+  store.dispatch(api.util.resetApiState())
+
+  expect(seenBefore).toEqual(['first', api.util.resetApiState.type])
+  expect(seenAfter).toEqual([
+    registeredType,
+    'first',
+    api.util.resetApiState.type,
+    registeredType,
+  ])
+  expect(store.getState()[api.reducerPath].config.middlewareRegistered).toBe(
+    true,
+  )
 })

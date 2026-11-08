@@ -141,7 +141,7 @@ function handwrittenReducer(state, action) {
 
 However, if you're thinking that "writing immutable updates by hand this way looks hard to remember and do correctly"... yeah, you're right! :)
 
-Writing immutable update logic by hand _is_ hard, and **accidentally mutating state in reducers is the single most common mistake Redux users make**.
+Writing immutable update logic by hand _is_ hard, and **accidentally mutating state in reducers is the single most common mistake Redux users make**. If you do need to write updates by hand, [Immutable Update Patterns](/usage/structuring-reducers/immutable-update-patterns) covers the correct patterns for nested objects and arrays and the mistakes that most often cause accidental mutations.
 
 ## Immutable Updates with Immer
 
@@ -150,7 +150,7 @@ Writing immutable update logic by hand _is_ hard, and **accidentally mutating st
 Immer provides a function called `produce`, which accepts two arguments: your original `state`, and a callback function. The callback function is given a "draft" version of that state, and inside the callback, it is safe to write code that mutates the draft value. Immer tracks all attempts to mutate the draft value and then replays those mutations using their immutable equivalents to create a safe, immutably updated result:
 
 ```js
-import produce from 'immer'
+import { produce } from 'immer'
 
 const baseState = [
   {
@@ -248,11 +248,11 @@ const todosSlice = createSlice({
       // "Mutate" the existing state, no return value needed
       state.push(action.payload)
     },
-    todoDeleted(state, action.payload) {
+    todoDeleted(state, action) {
       // Construct a new result array immutably and return it
-      return state.filter(todo => todo.id !== action.payload)
-    }
-  }
+      return state.filter((todo) => todo.id !== action.payload)
+    },
+  },
 })
 ```
 
@@ -261,15 +261,15 @@ However, it _is_ possible to use immutable updates to do part of the work and th
 ```js
 const todosSlice = createSlice({
   name: 'todos',
-  initialState: {todos: [], status: 'idle'}
+  initialState: { todos: [], status: 'idle' },
   reducers: {
-    todoDeleted(state, action.payload) {
+    todoDeleted(state, action) {
       // Construct a new array immutably
-      const newTodos = state.todos.filter(todo => todo.id !== action.payload)
+      const newTodos = state.todos.filter((todo) => todo.id !== action.payload)
       // "Mutate" the existing state to save the new array
       state.todos = newTodos
-    }
-  }
+    },
+  },
 })
 ```
 
@@ -363,7 +363,7 @@ const todosSlice = createSlice({
 
 It's common to want to log in-progress state from a reducer to see what it looks like as it's being updated, like `console.log(state)`. Unfortunately, browsers display logged Proxy instances in a format that is hard to read or understand:
 
-![Logged proxy draft](/img/usage/immer-reducers/logged-proxy.png)
+![Logged proxy draft](../assets/usage/immer-reducers/logged-proxy.png)
 
 To work around this, [Immer includes a `current` function that extracts a copy of the wrapped data](https://immerjs.github.io/immer/current), and RTK re-exports `current`. You can use this in your reducers if you need to log or inspect the work-in-progress state:
 
@@ -386,7 +386,7 @@ const todosSlice = createSlice({
 
 The correct output would look like this instead:
 
-![Logged current value](/img/usage/immer-reducers/logged-current-state.png)
+![Logged current value](../assets/usage/immer-reducers/logged-current-state.png)
 
 Immer also provides [`original` and `isDraft` functions](https://immerjs.github.io/immer/original), which retrieves the original data without any updates applied and check to see if a given value is a Proxy-wrapped draft. As of RTK 1.5.1, both of those are re-exported from RTK as well.
 
@@ -453,15 +453,69 @@ const itemsSlice = createSlice({
 
 Many ESLint configs include the https://eslint.org/docs/rules/no-param-reassign rule, which may also warn about mutations to nested fields. That can cause the rule to warn about mutations to `state` in Immer-powered reducers, which is not helpful.
 
-To resolve this, you can tell the ESLint rule to ignore mutations to a parameter named `state`:
+To resolve this, you can tell the ESLint rule to ignore mutations and assignment to a parameter named `state` only in slice files:
 
 ```js
-{
-  'no-param-reassign': ['error', { props: true, ignorePropertyModificationsFor: ['state'] }]
+// @filename .eslintrc.js
+module.exports = {
+  // add to your ESLint config definition
+  overrides: [
+    {
+      // feel free to replace with your preferred file pattern - eg. 'src/**/*Slice.ts'
+      files: ['src/**/*.slice.ts'],
+      // avoid state param assignment
+      rules: { 'no-param-reassign': ['error', { props: false }] },
+    },
+  ],
 }
-
 ```
+
+## Why Immer is Built In
+
+We've received a number of requests over time to make Immer an optional part of RTK's `createSlice` and `createReducer` APIs, rather than strictly required.
+
+Our answer is always the same: **Immer _is required_ in RTK, and that is not going to change**.
+
+It's worth going over the reasons why we consider Immer to be a critical part of RTK and why we will not make it optional.
+
+### Benefits of Immer
+
+Immer has two primary benefits. First, **Immer drastically simplifies immutable update logic**. [Proper immutable updates are extremely verbose](/usage/structuring-reducers/immutable-update-patterns#updating-nested-objects). Those verbose operations are hard to read overall, and also obfuscate what the actual intent of the update statement is. Immer eliminates all the nested spreads and array slices. Not only is the code shorter and easier to read, it's much more clear what actual update is supposed to happen.
+
+Second, [writing immutable updates correctly is _hard_](/usage/structuring-reducers/immutable-update-patterns), and it is really easy to make mistakes (like forgetting to copy a level of nesting in a set of object spreads, copying a top-level array and not the item to be updated inside the array, or forgetting that `array.sort()` mutates the array). This is part of why [accidental mutations has always been the most common cause of Redux bugs](/faq/react-redux#why-isnt-my-component-re-rendering). **Immer effectively _eliminates_ accidental mutations**. Not only are there no more spread operations that can be mis-written, but Immer freezes state automatically as well. This causes errors to be thrown if you do accidentally mutate, even outside of a reducer. **Eliminating the #1 cause of Redux bugs is a _huge_ improvement.**
+
+Additionally, RTK Query uses Immer's patch capabilities to enable [optimistic updates and manual cache updates](../rtk-query/usage/manual-cache-updates.mdx) as well.
+
+### Tradeoffs and Concerns
+
+Like any tool, using Immer does have tradeoffs, and users have expressed a number of concerns about using it.
+
+Immer does add to the overall app bundle size. It's about 8K min, 3.3K min+gz (ref: [Immer docs: Installation](https://immerjs.github.io/immer/installation), [Bundle.js.org analysis](https://bundle.js.org/?q=immer&treeshake=[{default+as+produce+}])). However, that library bundle size starts to pay for itself by shrinking the amount of reducer logic in your app. Additionally, the benefits of more readable code and eliminating mutation bugs are worth the size.
+
+Immer also adds a bit of overhead in runtime performance. However, [per the Immer "Performance" docs page, the overhead is not meaningful in practice](https://immerjs.github.io/immer/performance/). Additionally, [reducers are almost never a perf bottleneck in a Redux app anyway](https://github.com/reduxjs/redux-toolkit/issues/242#issuecomment-583296008). Instead, the cost of updating the UI is much more important.
+
+So, while using Immer isn't "free", the bundle and perf costs are small enough to be worth it.
+
+The most realistic pain point with using Immer is that browser debuggers show Proxies in a confusing way, which makes it hard to inspect state variables while debugging. This is certainly an annoyance. However, this doesn't actually affect runtime behavior, and we've [documented the use of `current` to create a viewable plain JS version of the data](#debugging-and-inspecting-drafted-state) above in this page. (Given the increasingly wide use of Proxies as part of libraries like Mobx and Vue 3, this is also not unique to Immer.)
+
+Another issue is education and understanding. Redux has always required immutability in reducers, and so seeing "mutating" code can be confusing. It's certainly possible that new Redux users might see those "mutations" in example code, assume that it's normal for Redux usage, and later try to do the same thing outside of `createSlice`. This would indeed cause real mutations and bugs, because it's outside of Immer's ability to wrap the updates.
+
+We've addressed this by [repeatedly emphasizing the important of immutability throughout our docs](/tutorials/essentials/part-1-overview-concepts#immutability), including multiple highlighted sections emphasizing that [the "mutations" only work right thanks to Immer's "magic" inside](/tutorials/essentials/part-2-app-structure#reducers-and-immutable-updates) and adding this specific docs page you're reading now.
+
+### Architecture and Intent
+
+There's two more reasons why Immer is not optional.
+
+One is RTK's architecture. `createSlice` and `createReducer` are implemented by directly importing Immer. There's no easy way to create a version of either of them that would have a hypothetical `immer: false` option. You can't do optional imports, and we need Immer available immediately and synchronously during the initial load of the app.
+
+And finally: **Immer is built into RTK by default because we believe it is the best choice for our users!** We _want_ our users to be using Immer, and consider it to be a critical non-negotiable component of RTK. The great benefits like simpler reducer code and preventing accidental mutations far outweigh the relatively small concerns.
 
 ## Further Information
 
 See [the Immer documentation](https://immerjs.github.io/immer/) for more details on Immer's APIs, edge cases, and behavior.
+
+For historical discussion on why Immer is required, see these issues:
+
+- [RTK #5: Why Immer inside a starter kit?](https://github.com/reduxjs/redux-toolkit/issues/5)
+- [RTK #183: Consider adding an option to remove Immer](https://github.com/reduxjs/redux-toolkit/issues/183)
+- [RTK #242: make `immer` optional for `createReducer`](https://github.com/reduxjs/redux-toolkit/issues/242)

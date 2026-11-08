@@ -4,6 +4,8 @@
 
 ```ts
 import type { ActionCreatorWithoutPayload } from '@reduxjs/toolkit'
+import type { UnknownAction } from '@reduxjs/toolkit'
+import type { SerializedError } from '@reduxjs/toolkit'
 import type { ThunkDispatch } from '@reduxjs/toolkit'
 
 // @public (undocumented)
@@ -12,13 +14,13 @@ export type Api<
   Definitions extends EndpointDefinitions,
   ReducerPath extends string,
   TagTypes extends string,
-  Enhancers extends ModuleName = CoreModule
+  Enhancers extends ModuleName = CoreModule,
 > = UnionToIntersection<
   ApiModules<BaseQuery, Definitions, ReducerPath, TagTypes>[Enhancers]
 > & {
   injectEndpoints<NewDefinitions extends EndpointDefinitions>(_: {
     endpoints: (
-      build: EndpointBuilder<BaseQuery, TagTypes, ReducerPath>
+      build: EndpointBuilder<BaseQuery, TagTypes, ReducerPath>,
     ) => NewDefinitions
     overrideExisting?: boolean
   }): Api<
@@ -54,17 +56,17 @@ export interface ApiModules<
   BaseQuery extends BaseQueryFn,
   Definitions extends EndpointDefinitions,
   ReducerPath extends string,
-  TagTypes extends string
+  TagTypes extends string,
 > {}
 
 // @public (undocumented)
 export type BaseQueryEnhancer<
   AdditionalArgs = unknown,
   AdditionalDefinitionExtraOptions = unknown,
-  Config = void
+  Config = void,
 > = <BaseQuery extends BaseQueryFn>(
   baseQuery: BaseQuery,
-  config: Config
+  config: Config,
 ) => BaseQueryFn<
   BaseQueryArg<BaseQuery> & AdditionalArgs,
   BaseQueryResult<BaseQuery>,
@@ -77,12 +79,14 @@ export type BaseQueryFn<
   Args = any,
   Result = unknown,
   Error = unknown,
-  DefinitionExtraOptions = {},
-  Meta = {}
+  DefinitionExtraOptions = {
+    copyWithStructuralSharing?: boolean
+  },
+  Meta = {},
 > = (
   args: Args,
   api: BaseQueryApi,
-  extraOptions: DefinitionExtraOptions
+  extraOptions: DefinitionExtraOptions,
 ) => MaybePromise<QueryReturnValue<Result, Error, Meta>>
 
 // @public
@@ -102,9 +106,9 @@ export type CreateApi<Modules extends ModuleName> = {
     BaseQuery extends BaseQueryFn,
     Definitions extends EndpointDefinitions,
     ReducerPath extends string = 'api',
-    TagTypes extends string = never
+    TagTypes extends string = never,
   >(
-    options: CreateApiOptions<BaseQuery, Definitions, ReducerPath, TagTypes>
+    options: CreateApiOptions<BaseQuery, Definitions, ReducerPath, TagTypes>,
   ): Api<BaseQuery, Definitions, ReducerPath, TagTypes, Modules>
 }
 
@@ -116,18 +120,33 @@ export interface CreateApiOptions<
   BaseQuery extends BaseQueryFn,
   Definitions extends EndpointDefinitions,
   ReducerPath extends string = 'api',
-  TagTypes extends string = never
+  TagTypes extends string = never,
 > {
   baseQuery: BaseQuery
   endpoints(
-    build: EndpointBuilder<BaseQuery, TagTypes, ReducerPath>
+    build: EndpointBuilder<BaseQuery, TagTypes, ReducerPath>,
   ): Definitions
+  extractRehydrationInfo?: (
+    action: UnknownAction,
+    {
+      reducerPath,
+    }: {
+      reducerPath: ReducerPath
+    },
+  ) =>
+    | undefined
+    | CombinedState<
+        NoInfer<Definitions>,
+        NoInfer<TagTypes>,
+        NoInfer<ReducerPath>
+      >
   keepUnusedDataFor?: number
   reducerPath?: ReducerPath
   refetchOnFocus?: boolean
   refetchOnMountOrArgChange?: boolean | number
   refetchOnReconnect?: boolean
-  serializeQueryArgs?: SerializeQueryArgs<BaseQueryArg<BaseQuery>>
+  serializeQueryArgs?: SerializeQueryArgs<unknown>
+  structuralSharing?: boolean
   tagTypes?: readonly TagTypes[]
 }
 
@@ -137,7 +156,7 @@ export type EndpointDefinition<
   BaseQuery extends BaseQueryFn,
   TagTypes extends string,
   ResultType,
-  ReducerPath extends string = string
+  ReducerPath extends string = string,
 > =
   | QueryDefinition<QueryArg, BaseQuery, TagTypes, ResultType, ReducerPath>
   | MutationDefinition<QueryArg, BaseQuery, TagTypes, ResultType, ReducerPath>
@@ -175,6 +194,7 @@ export function fetchBaseQuery({
   baseUrl,
   prepareHeaders,
   fetchFn,
+  paramsSerializer,
   ...baseFetchOptions
 }?: FetchBaseQueryArgs): BaseQueryFn<
   string | FetchArgs,
@@ -185,17 +205,32 @@ export function fetchBaseQuery({
 >
 
 // @public (undocumented)
-export interface FetchBaseQueryError {
-  // (undocumented)
-  data: unknown
-  // (undocumented)
-  status: number
-}
+export type FetchBaseQueryError =
+  | {
+      status: number
+      data: unknown
+    }
+  | {
+      status: 'FETCH_ERROR'
+      data?: undefined
+      error: string
+    }
+  | {
+      status: 'PARSING_ERROR'
+      originalStatus: number
+      data: string
+      error: string
+    }
+  | {
+      status: 'CUSTOM_ERROR'
+      data?: unknown
+      error: string
+    }
 
 // @public (undocumented)
 export type FetchBaseQueryMeta = {
   request: Request
-  response: Response
+  response?: Response
 }
 
 // @public (undocumented)
@@ -205,17 +240,25 @@ export type Module<Name extends ModuleName> = {
     BaseQuery extends BaseQueryFn,
     Definitions extends EndpointDefinitions,
     ReducerPath extends string,
-    TagTypes extends string
+    TagTypes extends string,
   >(
     api: Api<BaseQuery, EndpointDefinitions, ReducerPath, TagTypes, ModuleName>,
-    options: Required<
-      CreateApiOptions<BaseQuery, Definitions, ReducerPath, TagTypes>
+    options: WithRequiredProp<
+      CreateApiOptions<BaseQuery, Definitions, ReducerPath, TagTypes>,
+      | 'reducerPath'
+      | 'serializeQueryArgs'
+      | 'keepUnusedDataFor'
+      | 'refetchOnMountOrArgChange'
+      | 'refetchOnFocus'
+      | 'refetchOnReconnect'
+      | 'tagTypes'
+      | 'structuralSharing'
     >,
-    context: ApiContext<Definitions>
+    context: ApiContext<Definitions>,
   ): {
     injectEndpoint(
       endpointName: string,
-      definition: EndpointDefinition<any, any, any, any>
+      definition: EndpointDefinition<any, any, any, any>,
     ): void
   }
 }
@@ -226,7 +269,7 @@ export type MutationDefinition<
   BaseQuery extends BaseQueryFn,
   TagTypes extends string,
   ResultType,
-  ReducerPath extends string = string
+  ReducerPath extends string = string,
 > = BaseEndpointDefinition<QueryArg, BaseQuery, ResultType> &
   MutationExtraOptions<TagTypes, ResultType, QueryArg, BaseQuery, ReducerPath>
 
@@ -236,7 +279,7 @@ export type QueryDefinition<
   BaseQuery extends BaseQueryFn,
   TagTypes extends string,
   ResultType,
-  ReducerPath extends string = string
+  ReducerPath extends string = string,
 > = BaseEndpointDefinition<QueryArg, BaseQuery, ResultType> &
   QueryExtraOptions<TagTypes, ResultType, QueryArg, BaseQuery, ReducerPath>
 
@@ -255,8 +298,8 @@ export enum QueryStatus {
 // @public
 export const retry: BaseQueryEnhancer<
   unknown,
-  StaggerOptions,
-  void | StaggerOptions
+  RetryOptions,
+  void | RetryOptions
 > & {
   fail: typeof fail_2
 }
@@ -271,8 +314,8 @@ export function setupListeners(
       onFocusLost: typeof onFocusLost
       onOnline: typeof onOnline
       onOffline: typeof onOffline
-    }
-  ) => () => void
+    },
+  ) => () => void,
 ): () => void
 
 // @public @deprecated (undocumented)

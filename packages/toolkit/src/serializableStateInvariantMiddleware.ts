@@ -1,5 +1,5 @@
-import isPlainObject from './isPlainObject'
 import type { Middleware } from 'redux'
+import { isAction, isPlainObject } from './reduxImports'
 import { getTimeMeasureUtils } from './utils'
 
 /**
@@ -14,8 +14,7 @@ import { getTimeMeasureUtils } from './utils'
 export function isPlain(val: any) {
   const type = typeof val
   return (
-    type === 'undefined' ||
-    val === null ||
+    val == null ||
     type === 'string' ||
     type === 'boolean' ||
     type === 'number' ||
@@ -29,6 +28,8 @@ interface NonSerializableValue {
   value: unknown
 }
 
+export type IgnoredPaths = readonly (string | RegExp)[]
+
 /**
  * @public
  */
@@ -37,7 +38,28 @@ export function findNonSerializableValue(
   path: string = '',
   isSerializable: (value: unknown) => boolean = isPlain,
   getEntries?: (value: unknown) => [string, any][],
-  ignoredPaths: readonly string[] = []
+  ignoredPaths: IgnoredPaths = [],
+  cache?: WeakSet<object>,
+): NonSerializableValue | false {
+  return findNonSerializableValueRecursive(
+    value,
+    path,
+    isSerializable,
+    getEntries,
+    ignoredPaths,
+    cache,
+    new Set(),
+  )
+}
+
+function findNonSerializableValueRecursive(
+  value: unknown,
+  path: string,
+  isSerializable: (value: unknown) => boolean,
+  getEntries: ((value: unknown) => [string, any][]) | undefined,
+  ignoredPaths: IgnoredPaths,
+  cache: WeakSet<object> | undefined,
+  ancestors: Set<object>,
 ): NonSerializableValue | false {
   let foundNestedSerializable: NonSerializableValue | false
 
@@ -52,6 +74,17 @@ export function findNonSerializableValue(
     return false
   }
 
+  if (cache?.has(value)) return false
+
+  if (ancestors.has(value)) {
+    return {
+      keyPath: path || '<root>',
+      value,
+    }
+  }
+
+  ancestors.add(value)
+
   const entries = getEntries != null ? getEntries(value) : Object.entries(value)
 
   const hasIgnoredPaths = ignoredPaths.length > 0
@@ -59,8 +92,16 @@ export function findNonSerializableValue(
   for (const [key, nestedValue] of entries) {
     const nestedPath = path ? path + '.' + key : key
 
-    if (hasIgnoredPaths && ignoredPaths.indexOf(nestedPath) >= 0) {
-      continue
+    if (hasIgnoredPaths) {
+      const hasMatches = ignoredPaths.some((ignored) => {
+        if (ignored instanceof RegExp) {
+          return ignored.test(nestedPath)
+        }
+        return nestedPath === ignored
+      })
+      if (hasMatches) {
+        continue
+      }
     }
 
     if (!isSerializable(nestedValue)) {
@@ -71,12 +112,14 @@ export function findNonSerializableValue(
     }
 
     if (typeof nestedValue === 'object') {
-      foundNestedSerializable = findNonSerializableValue(
+      foundNestedSerializable = findNonSerializableValueRecursive(
         nestedValue,
         nestedPath,
         isSerializable,
         getEntries,
-        ignoredPaths
+        ignoredPaths,
+        cache,
+        ancestors,
       )
 
       if (foundNestedSerializable) {
@@ -85,7 +128,30 @@ export function findNonSerializableValue(
     }
   }
 
+  ancestors.delete(value)
+
+  if (cache && isNestedFrozen(value)) cache.add(value)
+
   return false
+}
+
+export function isNestedFrozen(value: object) {
+  return isNestedFrozenRecursive(value, new Set())
+}
+
+function isNestedFrozenRecursive(value: object, visited: Set<object>) {
+  if (!Object.isFrozen(value)) return false
+
+  if (visited.has(value)) return true
+  visited.add(value)
+
+  for (const nestedValue of Object.values(value)) {
+    if (typeof nestedValue !== 'object' || nestedValue === null) continue
+
+    if (!isNestedFrozenRecursive(nestedValue, visited)) return false
+  }
+
+  return true
 }
 
 /**
@@ -114,16 +180,17 @@ export interface SerializableStateInvariantMiddlewareOptions {
   ignoredActions?: string[]
 
   /**
-   * An array of dot-separated path strings to ignore when checking
-   * for serializability, Defaults to ['meta.arg']
+   * An array of dot-separated path strings or regular expressions to ignore
+   * when checking for serializability, Defaults to
+   * ['meta.arg', 'meta.baseQueryMeta', 'payload.options.pollingInterval']
    */
-  ignoredActionPaths?: string[]
+  ignoredActionPaths?: (string | RegExp)[]
 
   /**
-   * An array of dot-separated path strings to ignore when checking
-   * for serializability, Defaults to []
+   * An array of dot-separated path strings or regular expressions to ignore
+   * when checking for serializability, Defaults to []
    */
-  ignoredPaths?: string[]
+  ignoredPaths?: (string | RegExp)[]
   /**
    * Execution time warning threshold. If the middleware takes longer
    * than `warnAfter` ms, a warning will be displayed in the console.
@@ -132,9 +199,20 @@ export interface SerializableStateInvariantMiddlewareOptions {
   warnAfter?: number
 
   /**
-   * Opt out of checking state, but continue checking actions
+   * Opt out of checking state. When set to `true`, other state-related params will be ignored.
    */
   ignoreState?: boolean
+
+  /**
+   * Opt out of checking actions. When set to `true`, other action-related params will be ignored.
+   */
+  ignoreActions?: boolean
+
+  /**
+   * Opt out of caching the results. The cache uses a WeakSet and speeds up repeated checking processes.
+   * The cache is automatically disabled if no browser support for WeakSet is present.
+   */
+  disableCache?: boolean
 }
 
 /**
@@ -147,83 +225,104 @@ export interface SerializableStateInvariantMiddlewareOptions {
  * @public
  */
 export function createSerializableStateInvariantMiddleware(
-  options: SerializableStateInvariantMiddlewareOptions = {}
+  options: SerializableStateInvariantMiddlewareOptions = {},
 ): Middleware {
   if (process.env.NODE_ENV === 'production') {
     return () => (next) => (action) => next(action)
-  }
-  const {
-    isSerializable = isPlain,
-    getEntries,
-    ignoredActions = [],
-    ignoredActionPaths = ['meta.arg', 'meta.baseQueryMeta'],
-    ignoredPaths = [],
-    warnAfter = 32,
-    ignoreState = false,
-  } = options
+  } else {
+    const {
+      isSerializable = isPlain,
+      getEntries,
+      ignoredActions = [],
+      ignoredActionPaths = [
+        'meta.arg',
+        'meta.baseQueryMeta',
+        'payload.options.pollingInterval',
+      ],
+      ignoredPaths = [],
+      warnAfter = 32,
+      ignoreState = false,
+      ignoreActions = false,
+      disableCache = false,
+    } = options
 
-  return (storeAPI) => (next) => (action) => {
-    if (ignoredActions.length && ignoredActions.indexOf(action.type) !== -1) {
-      return next(action)
-    }
+    const cache: WeakSet<object> | undefined =
+      !disableCache && WeakSet ? new WeakSet() : undefined
 
-    const measureUtils = getTimeMeasureUtils(
-      warnAfter,
-      'SerializableStateInvariantMiddleware'
-    )
-    measureUtils.measureTime(() => {
-      const foundActionNonSerializableValue = findNonSerializableValue(
-        action,
-        '',
-        isSerializable,
-        getEntries,
-        ignoredActionPaths
+    return (storeAPI) => (next) => (action) => {
+      if (!isAction(action)) {
+        return next(action)
+      }
+
+      const result = next(action)
+
+      const measureUtils = getTimeMeasureUtils(
+        warnAfter,
+        'SerializableStateInvariantMiddleware',
       )
 
-      if (foundActionNonSerializableValue) {
-        const { keyPath, value } = foundActionNonSerializableValue
-
-        console.error(
-          `A non-serializable value was detected in an action, in the path: \`${keyPath}\`. Value:`,
-          value,
-          '\nTake a look at the logic that dispatched this action: ',
-          action,
-          '\n(See https://redux.js.org/faq/actions#why-should-type-be-a-string-or-at-least-serializable-why-should-my-action-types-be-constants)',
-          '\n(To allow non-serializable values see: https://redux-toolkit.js.org/usage/usage-guide#working-with-non-serializable-data)'
+      if (
+        !ignoreActions &&
+        !(
+          ignoredActions.length &&
+          ignoredActions.indexOf(action.type as any) !== -1
         )
-      }
-    })
-
-    const result = next(action)
-
-    if (!ignoreState) {
-      measureUtils.measureTime(() => {
-        const state = storeAPI.getState()
-
-        const foundStateNonSerializableValue = findNonSerializableValue(
-          state,
-          '',
-          isSerializable,
-          getEntries,
-          ignoredPaths
-        )
-
-        if (foundStateNonSerializableValue) {
-          const { keyPath, value } = foundStateNonSerializableValue
-
-          console.error(
-            `A non-serializable value was detected in the state, in the path: \`${keyPath}\`. Value:`,
-            value,
-            `
-Take a look at the reducer(s) handling this action type: ${action.type}.
-(See https://redux.js.org/faq/organizing-state#can-i-put-functions-promises-or-other-non-serializable-items-in-my-store-state)`
+      ) {
+        measureUtils.measureTime(() => {
+          const foundActionNonSerializableValue = findNonSerializableValue(
+            action,
+            '',
+            isSerializable,
+            getEntries,
+            ignoredActionPaths,
+            cache,
           )
-        }
-      })
 
-      measureUtils.warnIfExceeded()
+          if (foundActionNonSerializableValue) {
+            const { keyPath, value } = foundActionNonSerializableValue
+
+            console.error(
+              `A non-serializable value was detected in an action, in the path: \`${keyPath}\`. Value:`,
+              value,
+              '\nTake a look at the logic that dispatched this action: ',
+              action,
+              '\n(See https://redux.js.org/faq/actions#why-should-type-be-a-string-why-should-my-action-types-be-constants)',
+              '\n(To allow non-serializable values see: https://redux-toolkit.js.org/usage/usage-guide#working-with-non-serializable-data)',
+            )
+          }
+        })
+      }
+
+      if (!ignoreState) {
+        measureUtils.measureTime(() => {
+          const state = storeAPI.getState()
+
+          const foundStateNonSerializableValue = findNonSerializableValue(
+            state,
+            '',
+            isSerializable,
+            getEntries,
+            ignoredPaths,
+            cache,
+          )
+
+          if (foundStateNonSerializableValue) {
+            const { keyPath, value } = foundStateNonSerializableValue
+
+            console.error(
+              `A non-serializable value was detected in the state, in the path: \`${keyPath}\`. Value:`,
+              value,
+              `
+Take a look at the reducer(s) handling this action type: ${action.type}.
+(See https://redux.js.org/faq/organizing-state#can-i-put-functions-promises-or-other-non-serializable-items-in-my-store-state)`,
+            )
+          }
+        })
+
+        measureUtils.warnIfExceeded()
+      }
+
+      return result
     }
-
-    return result
   }
 }

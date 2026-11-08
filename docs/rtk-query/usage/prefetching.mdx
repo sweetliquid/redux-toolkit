@@ -19,6 +19,25 @@ There are a handful of situations that you may want to do this, but some very co
 3. User hovers over a next pagination button
 4. User navigates to a page and you know that some components down the tree will require said data. This way, you can prevent fetching waterfalls.
 
+## Prefetching vs Subscriptions
+
+Prefetching is designed as a "fire and forget" operation that loads data into the cache without creating an ongoing subscription. This means:
+
+- **No automatic refetching**: Prefetched data will not automatically refetch when tags are invalidated
+- **No subscription management**: You don't need to (and can't) manually unsubscribe from prefetched data
+- **Cache cleanup**: Prefetched data without active subscriptions may be removed during normal cache cleanup
+- **Returns void**: The prefetch trigger function doesn't return a promise or subscription handle
+
+If you need data that automatically refetches on invalidation or stays in the cache as long as a component is mounted, use a query hook like `useQuery` or `useQuerySubscription` instead. Prefetch is ideal for warming the cache before a user action, while query hooks are for ongoing data needs.
+
+:::tip When to use prefetch vs query hooks
+
+- **Use prefetch** when you want to load data ahead of time (e.g., on hover) but don't need it to stay fresh
+- **Use query hooks** when you need data that automatically refetches on invalidation and stays in cache while the component is mounted
+- **Use both together**: Prefetch on hover, then let the query hook create a subscription when the user navigates
+
+:::
+
 ## Prefetching with React Hooks
 
 Similar to the [`useMutation`](./mutations) hook, the `usePrefetch` hook will not run automatically — it returns a "trigger function" that can be used to initiate the behavior.
@@ -58,7 +77,7 @@ You can specify these prefetch options when declaring the hook or at the call si
    - **Assuming** you have a `useQuery` hook in the tree that is subscribed to the same query that you are prefetching:
      - `useQuery` will return `{isLoading: false, isFetching: true, ...rest`}
 
-```tsx title="usePrefetch Example"
+```tsx no-transpile title="usePrefetch Example"
 function User() {
   const prefetchUser = usePrefetch('getUser')
 
@@ -86,12 +105,12 @@ type EndpointNames = keyof typeof api.endpoints
 
 export function usePrefetchImmediately<T extends EndpointNames>(
   endpoint: T,
-  arg: Parameters<typeof api.endpoints[T]['initiate']>[0],
-  options: PrefetchOptions = {}
+  arg: Parameters<(typeof api.endpoints)[T]['initiate']>[0],
+  options: PrefetchOptions = {},
 ) {
-  const dispatch = useDispatch()
+  const dispatch = useAppDispatch()
   useEffect(() => {
-    dispatch(api.util.prefetch(endpoint, arg, options))
+    dispatch(api.util.prefetch(endpoint, arg as any, options))
   }, [])
 }
 
@@ -107,15 +126,33 @@ When dispatching the `prefetch` thunk as shown below you will see the same exact
 
 ```ts title="Non-hook prefetching example" no-transpile
 store.dispatch(
-  api.util.prefetch(endpointName, arg, { force: false, ifOlderThan: 10 })
+  api.util.prefetch(endpointName, arg, { force: false, ifOlderThan: 10 }),
 )
 ```
 
-You can also dispatch the query action, but you would be responsible for implementing any additional logic.
+### Prefetch vs `initiate()`
 
-```ts title="Alternate method of manual prefetching" no-transpile
-dispatch(api.endpoints[endpointName].initiate(arg, { forceRefetch: true }))
+While you can also use `initiate()` directly, there are important differences:
+
+```ts title="Using initiate() directly" no-transpile
+// This creates a subscription that must be manually cleaned up
+const promise = dispatch(
+  api.endpoints[endpointName].initiate(arg, {
+    subscribe: true, // Creates a subscription (default)
+    forceRefetch: true,
+  }),
+)
+
+// You must manually unsubscribe to prevent memory leaks
+promise.unsubscribe()
 ```
+
+**Key differences:**
+
+- **`api.util.prefetch()`**: Automatically uses `subscribe: false`, no cleanup needed
+- **`endpoint.initiate()`**: Defaults to `subscribe: true`, requires manual `unsubscribe()` call
+
+Use `prefetch()` for simple "load and forget" scenarios. Use `initiate()` directly only when you need fine-grained control over subscriptions and are prepared to manage the subscription lifecycle yourself.
 
 ## Prefetching Examples
 
@@ -139,36 +176,48 @@ This is a very basic example that shows how you can prefetch when a user hovers 
 
 ### Automatic Prefetching
 
-Picking up on our last example, we automatically `prefetch` the next page, giving the appearance of no network delay.
+Picking up on our last example, we automatically `prefetch` the next page whenever the current page loads, giving the appearance of no network delay.
 
-<iframe
-  src="https://codesandbox.io/embed/github/reduxjs/redux-toolkit/tree/master/examples/query/react/prefetching-automatic?fontsize=12&runonclick=1&hidenavigation=1&theme=dark"
-  style={{
-    width: '100%',
-    height: '600px',
-    border: 0,
-    borderRadius: '4px',
-    overflow: 'hidden',
-  }}
-  title="RTK Query - Automatic Prefetching Example (on hover)"
-  allow="geolocation; microphone; camera; midi; vr; accelerometer; gyroscope; payment; ambient-light-sensor; encrypted-media; usb"
-  sandbox="allow-modals allow-forms allow-popups allow-scripts allow-same-origin"
-></iframe>
+```tsx no-transpile title="src/features/posts/PostsManager.tsx"
+const PostList = () => {
+  const [page, setPage] = useState(1)
+  const { data: posts, isLoading, isFetching } = useListPostsQuery(page)
+  const prefetchPage = usePrefetch('listPosts')
+
+  const prefetchNext = useCallback(() => {
+    prefetchPage(page + 1)
+  }, [prefetchPage, page])
+
+  useEffect(() => {
+    if (page !== posts?.total_pages) {
+      prefetchNext()
+    }
+  }, [posts, page, prefetchNext])
+
+  // ...render the list and the prev/next buttons
+}
+```
 
 ### Prefetching All Known Pages
 
-After the first query initialized by `useQuery` runs, we automatically fetch all remaining pages.
+After the first query initialized by `useQuery` runs, we can fetch all remaining pages at once. `force: true` makes sure each page is fetched even if it is already in the cache.
 
-<iframe
-  src="https://codesandbox.io/embed/github/reduxjs/redux-toolkit/tree/master/examples/query/react/prefetching-automatic-waterfall?fontsize=12&runonclick=1&hidenavigation=1&theme=dark&module=%2Fsrc%2Ffeatures%2Fposts%2FPostsManager.tsx"
-  style={{
-    width: '100%',
-    height: '600px',
-    border: 0,
-    borderRadius: '4px',
-    overflow: 'hidden',
-  }}
-  title="RTK Query - Automatic Prefetching Waterfall Example"
-  allow="geolocation; microphone; camera; midi; vr; accelerometer; gyroscope; payment; ambient-light-sensor; encrypted-media; usb"
-  sandbox="allow-modals allow-forms allow-popups allow-scripts allow-same-origin"
-></iframe>
+```tsx no-transpile title="src/features/posts/PostsManager.tsx"
+const PostList = () => {
+  const [page, setPage] = useState(1)
+  const [hasPrefetchedAll, setHasPrefetchedAll] = useState(false)
+  const { data: posts, isLoading, isFetching } = useListPostsQuery(page)
+  const prefetchPage = usePrefetch('listPosts')
+
+  useEffect(() => {
+    if (!hasPrefetchedAll && posts && posts.total_pages > 1) {
+      for (let i = 1; i <= posts.total_pages; i++) {
+        prefetchPage(i, { force: true })
+      }
+      setHasPrefetchedAll(true)
+    }
+  }, [posts, prefetchPage, hasPrefetchedAll])
+
+  // ...render the list and the prev/next buttons
+}
+```

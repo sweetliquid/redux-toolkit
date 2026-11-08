@@ -22,6 +22,24 @@ description: 'RTK Query > Overview: a summary of the RTK Query data caching API 
 
 RTK Query is **an optional addon included in the Redux Toolkit package**, and its functionality is built on top of the other APIs in Redux Toolkit.
 
+:::info
+
+To learn how to use RTK Query, see the full ["Redux Essentials" tutorial](/tutorials/essentials/part-7-rtk-query-basics) on the Redux core docs site.
+
+If you prefer a video course, you can [watch this RTK Query video course by Lenz Weber-Tronic, the creator of RTK Query, for free at Egghead](https://egghead.io/courses/rtk-query-basics-query-endpoints-data-flow-and-typescript-57ea3c43?af=7pnhj6) or take a look at the first lesson right here:
+
+<div style={{position:"relative",paddingTop:"56.25%"}}>
+  <iframe 
+    src="https://app.egghead.io/lessons/redux-course-introduction-and-application-walk-through-for-rtk-query-basics/embed?af=7pnhj6" 
+    title="RTK Query Video course at Egghead: Course Introduction and Application Walk through for RTK Query Basics"
+    frameborder="0" 
+    allowfullscreen
+    style={{position:"absolute",top:0,left:0,width:"100%",height:"100%"}}
+  ></iframe>
+</div>
+
+:::
+
 ## Motivation
 
 Web applications normally need to fetch data from a server in order to display it. They also usually need to make updates to that data, send those updates to the server, and keep the cached data on the client in sync with the data on the server. This is made more complicated by the need to implement other behaviors used in today's applications:
@@ -31,7 +49,7 @@ Web applications normally need to fetch data from a server in order to display i
 - Optimistic updates to make the UI feel faster
 - Managing cache lifetimes as the user interacts with the UI
 
-The Redux core has always been very minimal - it's up to developers to write all the actual logic. That means that Redux has never included anything built in to help solve these use cases. The Redux docs have taught [some common patterns for dispatching actions around the request lifecycle to track loading state and request results](https://redux.js.org/tutorials/fundamentals/part-7-standard-patterns#async-request-status), and [Redux Toolkit's `createAsyncThunk` API](../api/createAsyncThunk.mdx) was designed to abstract that typical pattern. However, users still have to write significant amounts of reducer logic to manage the loading state and the cached data.
+The Redux core has always been very minimal - it's up to developers to write all the actual logic. That means that Redux has never included anything built in to help solve these use cases. The Redux docs have taught [some common patterns for dispatching actions around the request lifecycle to track loading state and request results](/tutorials/fundamentals/part-7-standard-patterns#async-request-status), and [Redux Toolkit's `createAsyncThunk` API](../api/createAsyncThunk.mdx) was designed to abstract that typical pattern. However, users still have to write significant amounts of reducer logic to manage the loading state and the cached data.
 
 Over the last couple years, the React community has come to realize that **"data fetching and caching" is really a different set of concerns than "state management"**. While you can use a state management library like Redux to cache data, the use cases are different enough that it's worth using tools that are purpose-built for the data fetching use case.
 
@@ -61,7 +79,7 @@ import { createApi } from '@reduxjs/toolkit/query/react'
 
 RTK Query includes these APIs:
 
-- [`createApi()`](./api/createApi.mdx): The core of RTK Query's functionality. It allows you to define a set of endpoints describe how to retrieve data from a series of endpoints, including configuration of how to fetch and transform that data. In most cases, you should use this once per app, with "one API slice per base URL" as a rule of thumb.
+- [`createApi()`](./api/createApi.mdx): The core of RTK Query's functionality. It allows you to define a set of "endpoints" that describe how to retrieve data from backend APIs and other async sources, including the configuration of how to fetch and transform that data. In most cases, you should use this once per app, with "one API slice per base URL" as a rule of thumb.
 - [`fetchBaseQuery()`](./api/fetchBaseQuery.mdx): A small wrapper around [`fetch`](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API) that aims to simplify requests. Intended as the recommended `baseQuery` to be used in `createApi` for the majority of users.
 - [`<ApiProvider />`](./api/ApiProvider.mdx): Can be used as a `Provider` if you **do not already have a Redux store**.
 - [`setupListeners()`](./api/setupListeners.mdx): A utility used to enable `refetchOnMount` and `refetchOnReconnect` behaviors.
@@ -97,14 +115,14 @@ For typical usage with React, start by importing `createApi` and defining an "AP
 
 ```ts
 import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
-import { Pokemon } from './types'
+import type { Pokemon } from './types'
 
 // Define a service using a base URL and expected endpoints
 export const pokemonApi = createApi({
   reducerPath: 'pokemonApi',
   baseQuery: fetchBaseQuery({ baseUrl: 'https://pokeapi.co/api/v2/' }),
-  endpoints: (builder) => ({
-    getPokemonByName: builder.query<Pokemon, string>({
+  endpoints: (build) => ({
+    getPokemonByName: build.query<Pokemon, string>({
       query: (name) => `pokemon/${name}`,
     }),
   }),
@@ -154,14 +172,14 @@ export default function App() {
   const { data, error, isLoading } = useGetPokemonByNameQuery('bulbasaur')
   // Individual hooks are also accessible under the generated endpoints:
   // const { data, error, isLoading } = pokemonApi.endpoints.getPokemonByName.useQuery('bulbasaur')
-  
+
   // render UI based on data and loading state
 }
 ```
 
 ## Further Information
 
-See the [**RTK Query Quick Start tutorial**](../tutorials/rtk-query.mdx/) for examples of how to add RTK Query to a project that uses Redux Toolkit, set up an "API slice" with endpoint definitions, and how to use the auto-generated React hooks in your components.
+See the [**RTK Query Quick Start tutorial**](../tutorials/rtk-query.mdx) for examples of how to add RTK Query to a project that uses Redux Toolkit, set up an "API slice" with endpoint definitions, and how to use the auto-generated React hooks in your components.
 
 The [**RTK Query usage guide section**](./usage/queries.mdx) has information on topics like [querying data](./usage/queries.mdx), [using mutations to send updates to the server](./usage/mutations.mdx), [streaming cache updates](./usage/streaming-updates.mdx), and much more.
 

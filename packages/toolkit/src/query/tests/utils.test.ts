@@ -1,114 +1,130 @@
+import { vi } from 'vitest'
 import {
   isOnline,
   isDocumentVisible,
-  flatten,
   joinUrls,
+  isAbsoluteUrl,
 } from '@internal/query/utils'
 
 afterAll(() => {
-  jest.restoreAllMocks()
+  vi.restoreAllMocks()
 })
 
 describe('isOnline', () => {
   test('Assumes online=true in a node env', () => {
-    jest
-      .spyOn(window, 'navigator', 'get')
-      .mockImplementation(() => undefined as any)
+    vi.spyOn(window, 'navigator', 'get').mockImplementation(
+      () => undefined as any,
+    )
 
     expect(navigator).toBeUndefined()
     expect(isOnline()).toBe(true)
   })
 
   test('Returns false if navigator isOnline=false', () => {
-    jest
-      .spyOn(window, 'navigator', 'get')
-      .mockImplementation(() => ({ onLine: false } as any))
+    vi.spyOn(window, 'navigator', 'get').mockImplementation(
+      () => ({ onLine: false }) as any,
+    )
     expect(isOnline()).toBe(false)
   })
 
   test('Returns true if navigator isOnline=true', () => {
-    jest
-      .spyOn(window, 'navigator', 'get')
-      .mockImplementation(() => ({ onLine: true } as any))
+    vi.spyOn(window, 'navigator', 'get').mockImplementation(
+      () => ({ onLine: true }) as any,
+    )
     expect(isOnline()).toBe(true)
   })
 })
 
 describe('isDocumentVisible', () => {
   test('Assumes true when in a non-browser env', () => {
-    jest
-      .spyOn(window, 'document', 'get')
-      .mockImplementation(() => undefined as any)
+    vi.spyOn(window, 'document', 'get').mockImplementation(
+      () => undefined as any,
+    )
     expect(window.document).toBeUndefined()
     expect(isDocumentVisible()).toBe(true)
   })
 
   test('Returns false when hidden=true', () => {
-    jest
-      .spyOn(window, 'document', 'get')
-      .mockImplementation(() => ({ visibilityState: 'hidden' } as any))
+    vi.spyOn(window, 'document', 'get').mockImplementation(
+      () => ({ visibilityState: 'hidden' }) as any,
+    )
     expect(isDocumentVisible()).toBe(false)
   })
 
   test('Returns true when visibilityState=prerender', () => {
-    jest
-      .spyOn(window, 'document', 'get')
-      .mockImplementation(() => ({ visibilityState: 'prerender' } as any))
+    vi.spyOn(window, 'document', 'get').mockImplementation(
+      () => ({ visibilityState: 'prerender' }) as any,
+    )
     expect(document.visibilityState).toBe('prerender')
     expect(isDocumentVisible()).toBe(true)
   })
   test('Returns true when visibilityState=visible', () => {
-    jest
-      .spyOn(window, 'document', 'get')
-      .mockImplementation(() => ({ visibilityState: 'visible' } as any))
+    vi.spyOn(window, 'document', 'get').mockImplementation(
+      () => ({ visibilityState: 'visible' }) as any,
+    )
     expect(document.visibilityState).toBe('visible')
     expect(isDocumentVisible()).toBe(true)
   })
   test('Returns true when visibilityState=undefined', () => {
-    jest
-      .spyOn(window, 'document', 'get')
-      .mockImplementation(() => ({ visibilityState: undefined } as any))
+    vi.spyOn(window, 'document', 'get').mockImplementation(
+      () => ({ visibilityState: undefined }) as any,
+    )
     expect(document.visibilityState).toBeUndefined()
     expect(isDocumentVisible()).toBe(true)
   })
 })
 
 describe('joinUrls', () => {
-  test('correctly joins variations of relative urls', () => {
-    expect(joinUrls('/api/', '/banana')).toBe('/api/banana')
-    expect(joinUrls('/api/', 'banana')).toBe('/api/banana')
-
-    expect(joinUrls('/api', 'banana')).toBe('/api/banana')
-    expect(joinUrls('/api', '/banana/')).toBe('/api/banana/')
-
-    expect(joinUrls('', '/banana')).toBe('/banana')
-    expect(joinUrls('', 'banana')).toBe('banana')
-  })
-
-  test('correctly joins variations of absolute urls', () => {
-    expect(joinUrls('https://example.com/api', 'banana')).toBe(
-      'https://example.com/api/banana'
-    )
-    expect(joinUrls('https://example.com/api', '/banana')).toBe(
-      'https://example.com/api/banana'
-    )
-
-    expect(joinUrls('https://example.com/api/', 'banana')).toBe(
-      'https://example.com/api/banana'
-    )
-    expect(joinUrls('https://example.com/api/', '/banana/')).toBe(
-      'https://example.com/api/banana/'
-    )
+  test.each([
+    ['/api/', '/banana', '/api/banana'],
+    ['/api/', 'banana', '/api/banana'],
+    ['/api', '/banana', '/api/banana'],
+    ['/api', 'banana', '/api/banana'],
+    ['', '/banana', '/banana'],
+    ['', 'banana', 'banana'],
+    ['api', '?a=1', 'api?a=1'],
+    ['api/', '?a=1', 'api/?a=1'],
+    ['api', 'banana?a=1', 'api/banana?a=1'],
+    ['api/', 'banana?a=1', 'api/banana?a=1'],
+    ['https://example.com/api', 'banana', 'https://example.com/api/banana'],
+    ['https://example.com/api', '/banana', 'https://example.com/api/banana'],
+    ['https://example.com/api/', 'banana', 'https://example.com/api/banana'],
+    ['https://example.com/api/', '/banana', 'https://example.com/api/banana'],
+    ['https://example.com/api/', 'https://example.org', 'https://example.org'],
+    ['https://example.com/api/', '//example.org', '//example.org'],
+    // a relative url may carry an absolute one in its query string; the base still applies
+    [
+      'https://example.com/api/',
+      'redirect?target=https://example.org',
+      'https://example.com/api/redirect?target=https://example.org',
+    ],
+    [
+      '/api/',
+      'img?src=http://cdn.example/a.png',
+      '/api/img?src=http://cdn.example/a.png',
+    ],
+  ])('%s and %s join to %s', (base, url, expected) => {
+    expect(joinUrls(base, url)).toBe(expected)
   })
 })
 
-describe('flatten', () => {
-  test('flattens an array to a depth of 1', () => {
-    expect(flatten([1, 2, [3, 4]])).toEqual([1, 2, 3, 4])
-  })
-  test('does not flatten to a depth of 2', () => {
-    const flattenResult = flatten([1, 2, [3, 4, [5, 6]]])
-    expect(flattenResult).not.toEqual([1, 2, 3, 4, 5, 6])
-    expect(flattenResult).toEqual([1, 2, 3, 4, [5, 6]])
+describe('isAbsoluteUrl', () => {
+  test.each([
+    ['https://example.com', true],
+    ['http://example.com', true],
+    ['ftp://example.com', true],
+    ['web+custom://example.com', true],
+    ['//example.com', true],
+    ['banana', false],
+    ['/banana', false],
+    ['./banana', false],
+    ['banana/split', false],
+    ['?a=1', false],
+    // relative urls that merely contain an absolute one
+    ['redirect?target=https://example.org', false],
+    ['img?src=http://cdn.example/a.png', false],
+    ['search?q=a://b', false],
+  ])('%s is absolute: %s', (url, expected) => {
+    expect(isAbsoluteUrl(url)).toBe(expected)
   })
 })

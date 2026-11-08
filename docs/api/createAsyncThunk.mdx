@@ -25,23 +25,33 @@ Redux Toolkit's [**RTK Query data fetching API**](../rtk-query/overview.md) is a
 
 Sample usage:
 
-```js {5-11,22-25,30}
+```ts no-transpile {5-11,22-25,30}
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit'
 import { userAPI } from './userAPI'
 
 // First, create the thunk
 const fetchUserById = createAsyncThunk(
   'users/fetchByIdStatus',
-  async (userId, thunkAPI) => {
+  async (userId: number, thunkAPI) => {
     const response = await userAPI.fetchById(userId)
     return response.data
-  }
+  },
 )
+
+interface UsersState {
+  entities: User[]
+  loading: 'idle' | 'pending' | 'succeeded' | 'failed'
+}
+
+const initialState = {
+  entities: [],
+  loading: 'idle',
+} satisfies UserState as UsersState
 
 // Then, handle actions in your reducers:
 const usersSlice = createSlice({
   name: 'users',
-  initialState: { entities: [], loading: 'idle' },
+  initialState,
   reducers: {
     // standard reducer logic, with auto-generated action types per reducer
   },
@@ -86,7 +96,7 @@ The `payloadCreator` function will be called with two arguments:
   - `getState`: the Redux store `getState` method
   - `extra`: the "extra argument" given to the thunk middleware on setup, if available
   - `requestId`: a unique string ID value that was automatically generated to identify this request sequence
-  - `signal`: an [`AbortController.signal` object](https://developer.mozilla.org/en-US/docs/Web/API/AbortController/signal) that may be used to see if another part of the app logic has marked this request as needing cancelation.
+  - `signal`: an [`AbortController.signal` object](https://developer.mozilla.org/en-US/docs/Web/API/AbortController/signal) that may be used to see if another part of the app logic has marked this request as needing cancellation.
   - `rejectWithValue(value, [meta])`: rejectWithValue is a utility function that you can `return` (or `throw`) in your action creator to return a rejected response with a defined payload and meta. It will pass whatever value you give it and return it in the payload of the rejected action. If you also pass in a `meta`, it will be merged with the existing `rejectedAction.meta`.
   - `fulfillWithValue(value, meta)`: fulfillWithValue is a utility function that you can `return` in your action creator to `fulfill` with a value while having the ability of adding to `fulfilledAction.meta`.
 
@@ -96,9 +106,9 @@ The logic in the `payloadCreator` function may use any of these values as needed
 
 An object with the following optional fields:
 
-- `condition(arg, { getState, extra } ): boolean`: a callback that can be used to skip execution of the payload creator and all action dispatches, if desired. See [Canceling Before Execution](#canceling-before-execution) for a complete description.
+- `condition(arg, { getState, extra } ): boolean | Promise<boolean>`: a callback that can be used to skip execution of the payload creator and all action dispatches, if desired. See [Canceling Before Execution](#canceling-before-execution) for a complete description.
 - `dispatchConditionRejection`: if `condition()` returns `false`, the default behavior is that no actions will be dispatched at all. If you still want a "rejected" action to be dispatched when the thunk was canceled, set this flag to `true`.
-- `idGenerator(): string`: a function to use when generating the `requestId` for the request sequence. Defaults to use [nanoid](./otherExports.mdx/#nanoid).
+- `idGenerator(arg): string`: a function to use when generating the `requestId` for the request sequence. Defaults to use [nanoid](./otherExports.mdx#nanoid), but you can implement your own ID generation logic.
 - `serializeError(error: unknown) => any` to replace the internal `miniSerializeError` method with your own serialization logic.
 - `getPendingMeta({ arg, requestId }, { getState, extra }): any`: a function to create an object that will be merged into the `pendingAction.meta` field.
 
@@ -122,6 +132,18 @@ When dispatched, the thunk will:
   - if the promise resolved with a `rejectWithValue(value)` return value, dispatch the `rejected` action with the value passed into `action.payload` and 'Rejected' as `action.error.message`
   - if the promise failed and was not handled with `rejectWithValue`, dispatch the `rejected` action with a serialized version of the error value as `action.error`
 - Return a fulfilled promise containing the final dispatched action (either the `fulfilled` or `rejected` action object)
+
+## Thunk Dispatch Options
+
+The returned thunk action creator accepts an optional second argument with the following options:
+
+- `signal`: an optional [`AbortSignal`](https://developer.mozilla.org/en-US/docs/Web/API/AbortSignal) that will be tracked by the internal abort signal (see [Canceling While Running](#canceling-while-running))
+
+```ts no-transpile
+const externalController = new AbortController()
+dispatch(fetchUserById(123, { signal: externalController.signal }))
+externalController.abort()
+```
 
 ## Promise Lifecycle Actions
 
@@ -180,52 +202,58 @@ interface RejectedWithValueAction<ThunkArg, RejectedValue> {
 
 type Pending = <ThunkArg>(
   requestId: string,
-  arg: ThunkArg
+  arg: ThunkArg,
 ) => PendingAction<ThunkArg>
 
 type Fulfilled = <ThunkArg, PromiseResult>(
   payload: PromiseResult,
   requestId: string,
-  arg: ThunkArg
+  arg: ThunkArg,
 ) => FulfilledAction<ThunkArg, PromiseResult>
 
 type Rejected = <ThunkArg>(
   requestId: string,
-  arg: ThunkArg
+  arg: ThunkArg,
 ) => RejectedAction<ThunkArg>
 
 type RejectedWithValue = <ThunkArg, RejectedValue>(
   requestId: string,
-  arg: ThunkArg
+  arg: ThunkArg,
 ) => RejectedWithValueAction<ThunkArg, RejectedValue>
 ```
 
-To handle these actions in your reducers, reference the action creators in `createReducer` or `createSlice` using either the object key notation or the "builder callback" notation. (Note that if you use TypeScript, you [should use the "builder callback" notation to ensure the types are inferred correctly](../usage/usage-with-typescript.md#type-safety-with-extrareducers)):
+To handle these actions in your reducers, reference the action creators in `createReducer` or `createSlice` using the "builder callback" notation.
 
-```js {2,6,14,23}
-const reducer1 = createReducer(initialState, {
-  [fetchUserById.fulfilled]: (state, action) => {},
-})
-
-const reducer2 = createReducer(initialState, (builder) => {
+```ts no-transpile {2,10}
+const reducer1 = createReducer(initialState, (builder) => {
   builder.addCase(fetchUserById.fulfilled, (state, action) => {})
 })
 
-const reducer3 = createSlice({
-  name: 'users',
-  initialState,
-  reducers: {},
-  extraReducers: {
-    [fetchUserById.fulfilled]: (state, action) => {},
-  },
-})
-
-const reducer4 = createSlice({
+const reducer2 = createSlice({
   name: 'users',
   initialState,
   reducers: {},
   extraReducers: (builder) => {
     builder.addCase(fetchUserById.fulfilled, (state, action) => {})
+  },
+})
+```
+
+Additionally, a `settled` matcher is attached, for matching against both fulfilled and rejected actions. Conceptually this is similar to a `finally` block.
+
+Make sure you use `addMatcher` instead of `addCase`, since `settled` is a matcher rather than an action creator.
+
+```ts no-transpile {2,10}
+const reducer1 = createReducer(initialState, (builder) => {
+  builder.addMatcher(fetchUserById.settled, (state, action) => {})
+})
+
+const reducer2 = createSlice({
+  name: 'users',
+  initialState,
+  reducers: {},
+  extraReducers: (builder) => {
+    builder.addMatcher(fetchUserById.settled, (state, action) => {})
   },
 })
 ```
@@ -236,7 +264,7 @@ const reducer4 = createSlice({
 
 Thunks may return a value when dispatched. A common use case is to return a promise from the thunk, dispatch the thunk from a component, and then wait for the promise to resolve before doing additional work:
 
-```js
+```ts no-transpile
 const onClick = () => {
   dispatch(fetchUserById(userId)).then(() => {
     // do additional work
@@ -276,6 +304,16 @@ const onClick = async () => {
     // handle error here
   }
 }
+```
+
+In TypeScript, the promise returned by dispatching the thunk has the type `AsyncThunkPromise<Returned, ThunkArg, ThunkApiConfig>`. Besides `unwrap()`, it also has `abort()`, `requestId`, and `arg` (see [Cancellation](#cancellation)):
+
+```ts no-transpile
+import type { AsyncThunkPromise } from '@reduxjs/toolkit'
+
+const promise: AsyncThunkPromise<User, number, {}> = dispatch(
+  fetchUserById(userId),
+)
 ```
 
 Using the attached `.unwrap()` property is preferred in most cases, however Redux Toolkit also exports an `unwrapResult` function that can be used for a similar purpose:
@@ -336,7 +374,7 @@ If you need to customize the contents of the `rejected` action, you should catch
 
 The `rejectWithValue` approach should also be used if your API response "succeeds", but contains some kind of additional error details that the reducer should know about. This is particularly common when expecting field-level validation errors from an API.
 
-```js
+```ts no-transpile
 const updateUser = createAsyncThunk(
   'users/update',
   async (userData, { rejectWithValue }) => {
@@ -349,7 +387,7 @@ const updateUser = createAsyncThunk(
       // by explicitly returning it using the `rejectWithValue()` utility
       return rejectWithValue(err.response.data)
     }
-  }
+  },
 )
 ```
 
@@ -357,12 +395,12 @@ const updateUser = createAsyncThunk(
 
 ### Canceling Before Execution
 
-If you need to cancel a thunk before the payload creator is called, you may provide a `condition` callback as an option after the payload creator. The callback will receive the thunk argument and an object with `{getState, extra}` as parameters, and use those to decide whether to continue or not. If the execution should be canceled, the `condition` callback should return a literal `false` value:
+If you need to cancel a thunk before the payload creator is called, you may provide a `condition` callback as an option after the payload creator. The callback will receive the thunk argument and an object with `{getState, extra}` as parameters, and use those to decide whether to continue or not. If the execution should be canceled, the `condition` callback should return a literal `false` value or a promise that should resolve to `false`. If a promise is returned, the thunk waits for it to get fulfilled before dispatching the `pending` action, otherwise it proceeds with dispatching synchronously.
 
-```js
+```ts no-transpile
 const fetchUserById = createAsyncThunk(
   'users/fetchByIdStatus',
-  async (userId, thunkAPI) => {
+  async (userId: number, thunkAPI) => {
     const response = await userAPI.fetchById(userId)
     return response.data
   },
@@ -375,7 +413,7 @@ const fetchUserById = createAsyncThunk(
         return false
       }
     },
-  }
+  },
 )
 ```
 
@@ -387,9 +425,10 @@ If you want to cancel your running thunk before it has finished, you can use the
 
 A real-life example of that would look like this:
 
-```ts
+```ts no-transpile
 // file: store.ts noEmit
-import { configureStore, Reducer } from '@reduxjs/toolkit'
+import { configureStore } from '@reduxjs/toolkit'
+import type { Reducer } from '@reduxjs/toolkit'
 import { useDispatch } from 'react-redux'
 
 declare const reducer: Reducer<{}>
@@ -402,7 +441,7 @@ export const fetchUserById = createAsyncThunk(
   'fetchUserById',
   (userId: string) => {
     /* ... */
-  }
+  },
 )
 
 // file: MyComponent.ts
@@ -429,7 +468,7 @@ Additionally, your `payloadCreator` can use the `AbortSignal` it is passed via `
 
 The `fetch` api of modern browsers already comes with support for an `AbortSignal`:
 
-```ts
+```ts no-transpile
 import { createAsyncThunk } from '@reduxjs/toolkit'
 
 const fetchUserById = createAsyncThunk(
@@ -439,7 +478,7 @@ const fetchUserById = createAsyncThunk(
       signal: thunkAPI.signal,
     })
     return await response.json()
-  }
+  },
 )
 ```
 
@@ -449,7 +488,7 @@ const fetchUserById = createAsyncThunk(
 
 You can use the `signal.aborted` property to regularly check if the thunk has been aborted and in that case stop costly long-running work:
 
-```ts
+```ts no-transpile
 import { createAsyncThunk } from '@reduxjs/toolkit'
 
 const readStream = createAsyncThunk(
@@ -469,7 +508,7 @@ const readStream = createAsyncThunk(
       done = read.done
     }
     return result
-  }
+  },
 )
 ```
 
@@ -478,13 +517,13 @@ const readStream = createAsyncThunk(
 You can also call `signal.addEventListener('abort', callback)` to have logic inside the thunk be notified when `promise.abort()` was called.
 This can for example be used in conjunction with an axios `CancelToken`:
 
-```ts
+```ts no-transpile
 import { createAsyncThunk } from '@reduxjs/toolkit'
 import axios from 'axios'
 
 const fetchUserById = createAsyncThunk(
   'users/fetchById',
-  async (userId, { signal }) => {
+  async (userId: string, { signal }) => {
     const source = axios.CancelToken.source()
     signal.addEventListener('abort', () => {
       source.cancel()
@@ -493,29 +532,62 @@ const fetchUserById = createAsyncThunk(
       cancelToken: source.token,
     })
     return response.data
-  }
+  },
 )
+```
+
+### Checking if a Promise Rejection was from an Error or Cancellation
+
+To investigate behavior around thunk cancellation, you can inspect various properties on the `meta` object of the dispatched action.
+If a thunk was cancelled, the result of the promise will be a `rejected` action (regardless of whether that action was actually dispatched to the store).
+
+- If it was cancelled before execution, `meta.condition` will be true.
+- If it was aborted while running, `meta.aborted` will be true.
+- If neither of those is true, the thunk was not cancelled, it was simply rejected, either by a Promise rejection or `rejectWithValue`.
+- If the thunk was not rejected, both `meta.aborted` and `meta.condition` will be `undefined`.
+
+So if you wanted to test that a thunk was cancelled before executing, you can do the following:
+
+```ts no-transpile
+import { createAsyncThunk } from '@reduxjs/toolkit'
+
+test('this thunk should always be skipped', async () => {
+  const thunk = createAsyncThunk(
+    'users/fetchById',
+    async () => throw new Error('This promise should never be entered'),
+    {
+      condition: () => false,
+    }
+  )
+  const result = await thunk()(dispatch, getState, null)
+
+  expect(result.meta.condition).toBe(true)
+  expect(result.meta.aborted).toBe(false)
+})
 ```
 
 ## Examples
 
 - Requesting a user by ID, with loading state, and only one request at a time:
 
-```js
+```ts no-transpile
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit'
-import { userAPI } from './userAPI'
+import { userAPI, User } from './userAPI'
 
-const fetchUserById = createAsyncThunk(
-  'users/fetchByIdStatus',
-  async (userId, { getState, requestId }) => {
-    const { currentRequestId, loading } = getState().users
-    if (loading !== 'pending' || requestId !== currentRequestId) {
-      return
-    }
-    const response = await userAPI.fetchById(userId)
-    return response.data
+const fetchUserById = createAsyncThunk<
+  User,
+  string,
+  {
+    state: { users: { loading: string; currentRequestId: string } }
   }
-)
+>('users/fetchByIdStatus', async (userId: string, { getState, requestId }) => {
+  const { currentRequestId, loading } = getState().users
+  if (loading !== 'pending' || requestId !== currentRequestId) {
+    return
+  }
+  const response = await userAPI.fetchById(userId)
+  return response.data
+})
 
 const usersSlice = createSlice({
   name: 'users',
@@ -580,9 +652,10 @@ const UsersComponent = () => {
 
   _Note: this is a contrived example assuming our userAPI only ever throws validation-specific errors_
 
-```ts
+```ts no-transpile
 // file: store.ts noEmit
-import { configureStore, Reducer } from '@reduxjs/toolkit'
+import { configureStore } from '@reduxjs/toolkit'
+import type { Reducer } from '@reduxjs/toolkit'
 import { useDispatch } from 'react-redux'
 import usersReducer from './user/slice'
 
@@ -599,7 +672,7 @@ export declare const userAPI: {
 // file: user/slice.ts
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit'
 import { userAPI } from './userAPI'
-import { AxiosError } from 'axios'
+import type { AxiosError } from 'axios'
 
 // Sample types that will be used
 export interface User {
@@ -648,7 +721,7 @@ interface UsersState {
 const initialState = {
   entities: {},
   error: null,
-} as UsersState
+} satisfies UsersState as UsersState
 
 const usersSlice = createSlice({
   name: 'users',
@@ -681,10 +754,12 @@ declare module 'some-toast-library' {
 // file: user/UsersComponent.ts
 
 import React from 'react'
-import { useAppDispatch, RootState } from '../store'
+import { useAppDispatch } from '../store'
+import type { RootState } from '../store'
 import { useSelector } from 'react-redux'
-import { User, updateUser } from './slice'
-import { FormikHelpers } from 'formik'
+import { updateUser } from './slice'
+import type { User } from './slice'
+import type { FormikHelpers } from 'formik'
 import { showToast } from 'some-toast-library'
 
 interface FormValues extends Omit<User, 'id'> {}
@@ -696,7 +771,7 @@ const UsersComponent = (props: { id: string }) => {
   // This is an example of an onSubmit handler using Formik meant to demonstrate accessing the payload of the rejected action
   const handleUpdateUser = async (
     values: FormValues,
-    formikHelpers: FormikHelpers<FormValues>
+    formikHelpers: FormikHelpers<FormValues>,
   ) => {
     const resultAction = await dispatch(updateUser({ id: props.id, ...values }))
     if (updateUser.fulfilled.match(resultAction)) {
